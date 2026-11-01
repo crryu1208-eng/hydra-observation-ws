@@ -18,6 +18,7 @@ from pyvistaqt import QtInteractor  # noqa: E402
 from qtpy import QtCore, QtGui, QtWidgets  # noqa: E402
 
 from . import model  # noqa: E402
+from .camera import CameraPanel  # noqa: E402
 from .scene import DEFAULT_STYLE, GROUP_STYLE, SceneView, label_color  # noqa: E402
 
 ID_ROLE = QtCore.Qt.UserRole
@@ -47,7 +48,7 @@ class Inspector(QtWidgets.QWidget):
     """Attributes, connections and recorded frames of the selected node."""
 
     navigate = QtCore.Signal(int)
-    frame_selected = QtCore.Signal(object)
+    frame_selected = QtCore.Signal(int)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -99,24 +100,8 @@ class Inspector(QtWidgets.QWidget):
         self.frames.setUniformItemSizes(True)
         self.frames.setMovement(QtWidgets.QListView.Static)
         self.frames.currentItemChanged.connect(self._on_frame)
-        self.preview = QtWidgets.QLabel()
-        self.preview.setAlignment(QtCore.Qt.AlignCenter)
-        self.preview.setMinimumHeight(200)
-        self.preview.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Ignored)
-        self.frame_meta = QtWidgets.QLabel("")
-        self.frame_meta.setWordWrap(True)
-        self.frame_meta.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
-        split = QtWidgets.QSplitter(QtCore.Qt.Vertical)
-        split.addWidget(self.frames)
-        pv_box = QtWidgets.QWidget()
-        pl = QtWidgets.QVBoxLayout(pv_box)
-        pl.setContentsMargins(0, 0, 0, 0)
-        pl.addWidget(self.preview, 1)
-        pl.addWidget(self.frame_meta)
-        split.addWidget(pv_box)
-        split.setSizes([200, 320])
         fl.addWidget(self.frames_info)
-        fl.addWidget(split, 1)
+        fl.addWidget(self.frames, 1)
         self.frames_tab_index = tabs.addTab(frames_tab, "Frames")
         self.tabs = tabs
 
@@ -126,7 +111,6 @@ class Inspector(QtWidgets.QWidget):
         self._thumb_timer.timeout.connect(self._load_thumbs)
         self.copy.clicked.connect(self._copy_json)
         self._node = None
-        self._preview_pm = None
 
     # ---- content ------------------------------------------------------------------------
     def show_node(self, g: model.SceneGraph, n: model.Node | None):
@@ -135,9 +119,6 @@ class Inspector(QtWidgets.QWidget):
         self.links.clear()
         self.frames.clear()
         self._pending.clear()
-        self.preview.clear()
-        self._preview_pm = None
-        self.frame_meta.clear()
         self.fly.setEnabled(n is not None)
         self.copy.setEnabled(n is not None)
         if n is None:
@@ -190,8 +171,8 @@ class Inspector(QtWidgets.QWidget):
         elif n.group != "Agents":
             self.frames_info.setText("Recorded frames are attached to agent (trajectory) nodes.")
         else:
-            self.frames_info.setText(f"{len(frames)} RGB frames mapped to {n.symbol}. Click one to preview it "
-                                     "and mark its camera position in 3D.")
+            self.frames_info.setText(f"{len(frames)} frames mapped to {n.symbol}. Click one to show its RGB and "
+                                     "depth in the camera panel and its camera in 3D.")
         for f in frames:
             it = QtWidgets.QListWidgetItem(f"#{f.frame_id}")
             it.setData(ID_ROLE, f.frame_id)
@@ -215,40 +196,20 @@ class Inspector(QtWidgets.QWidget):
                     it.setIcon(QtGui.QIcon(QtGui.QPixmap.fromImage(img)))
 
     def _on_frame(self, cur, _prev=None):
-        if cur is None or self._node is None:
-            return
-        win = self.window()
-        g = getattr(win, "graph", None)
-        if g is None or g.observations is None:
-            return
-        f = g.observations.frames.get(cur.data(ID_ROLE))
-        if f is None:
-            return
-        self._preview_pm = QtGui.QPixmap(str(f.rgb_path)) if f.rgb_path and f.rgb_path.exists() else None
-        self._fit_preview()
-        mp = f.mapping or {}
-        t0 = self._node.timestamp_ns or f.timestamp_ns
-        lines = [f"frame {f.frame_id} · {f.rgb_path.name if f.rgb_path else 'no rgb'}",
-                 f"t = {f.timestamp_ns} ({(f.timestamp_ns - t0) / 1e9:+.2f} s from node)",
-                 f"mapping: {mp.get('type', '?')} / {mp.get('status', '?')}"
-                 + (f", {mp['distance_m']:.2f} m" if isinstance(mp.get('distance_m'), (int, float)) else "")
-                 + (f", {np.degrees(mp['angle_rad']):.0f}°" if isinstance(mp.get('angle_rad'), (int, float)) else "")]
-        if f.position is not None:
-            lines.append(f"camera body at ({f.position[0]:.2f}, {f.position[1]:.2f}, {f.position[2]:.2f}) m")
-        self.frame_meta.setText("\n".join(lines))
-        self.frame_selected.emit(f)
+        if cur is not None and self._node is not None:
+            self.frame_selected.emit(int(cur.data(ID_ROLE)))
 
-    def _fit_preview(self):
-        if self._preview_pm is None or self._preview_pm.isNull():
-            self.preview.setText("image not found")
-            return
-        self.preview.setPixmap(self._preview_pm.scaled(self.preview.size(), QtCore.Qt.KeepAspectRatio,
-                                                       QtCore.Qt.SmoothTransformation))
-
-    def resizeEvent(self, e):
-        super().resizeEvent(e)
-        if self._preview_pm is not None:
-            self._fit_preview()
+    def select_frame(self, frame_id: int):
+        """Highlight frame_id in the list (if it belongs to the shown node) without emitting."""
+        self.frames.blockSignals(True)
+        for i in range(self.frames.count()):
+            if self.frames.item(i).data(ID_ROLE) == frame_id:
+                self.frames.setCurrentRow(i)
+                self.frames.scrollToItem(self.frames.item(i))
+                break
+        else:
+            self.frames.clearSelection()
+        self.frames.blockSignals(False)
 
     def _on_link(self, item, _col=0):
         nid = item.data(0, ID_ROLE)
@@ -305,15 +266,26 @@ class MainWindow(QtWidgets.QMainWindow):
         self.inspector = Inspector()
         self.inspector.navigate.connect(lambda nid: self.select_node(nid, fly=True))
         self.inspector.fly.clicked.connect(lambda: self.scene.selected is not None and self.scene.focus(self.scene.selected))
-        self.inspector.frame_selected.connect(self._mark_frame)
+        self.inspector.frame_selected.connect(lambda fid: self.show_frame(fid, from_inspector=True))
         rdock = QtWidgets.QDockWidget("Inspector", self)
         rdock.setObjectName("inspector")
         rdock.setWidget(self.inspector)
         self.addDockWidget(QtCore.Qt.RightDockWidgetArea, rdock)
         self.resizeDocks([dock, rdock], [300, 420], QtCore.Qt.Horizontal)
 
+        # bottom: RGB + depth of the selected camera position
+        self.camera = CameraPanel()
+        self.camera.frame_changed.connect(lambda fid: self.show_frame(fid, from_camera=True))
+        self.camera.select_node.connect(lambda nid: self.select_node(nid, keep_frame=True))
+        cdock = QtWidgets.QDockWidget("Camera (RGB / depth)", self)
+        cdock.setObjectName("camera")
+        cdock.setWidget(self.camera)
+        self.addDockWidget(QtCore.Qt.BottomDockWidgetArea, cdock)
+        self.resizeDocks([cdock], [330], QtCore.Qt.Vertical)
+        self.camera_dock = cdock
+
         self._build_toolbar()
-        self._build_menu(dock, rdock)
+        self._build_menu(dock, rdock, cdock)
         self.statusBar().showMessage("Open a scene graph: File ▸ Open (dsg.json, dsg_with_mesh.json or a session folder)")
 
         # click-to-pick (ignore drags)
@@ -414,10 +386,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.scene.set_graph(g)
         self._fill_tree()
         self.inspector.show_node(g, None)
+        self.camera.set_observations(g.observations)
         QtWidgets.QApplication.restoreOverrideCursor()
         counts = ", ".join(f"{len(v)} {k.lower()}" for k, v in g.groups().items())
         mesh = f", mesh {len(g.mesh.points):,} vertices" if g.mesh is not None else ", no mesh"
-        obs = f", {len(g.observations.frames):,} recorded frames" if g.observations else ""
+        obs = (f", {len(g.observations.frames):,} recorded frames (click the trajectory to see RGB / depth)"
+               if g.observations else "")
         self.setWindowTitle(f"DSG Viewer — {g.path}")
         self.statusBar().showMessage(f"{counts}; {len(g.edges)} edges{mesh}{obs}")
 
@@ -494,7 +468,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._set_opt(hidden_groups=frozenset(hidden))
 
     # ---- selection and view -----------------------------------------------------------------
-    def select_node(self, nid, from_tree=False, fly=False):
+    def select_node(self, nid, from_tree=False, fly=False, keep_frame=False):
         if self.graph is None:
             return
         n = self.graph.nodes.get(nid) if nid is not None else None
@@ -510,17 +484,29 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.tree.blockSignals(False)
         if n is not None and n.group == "Agents" and self.graph.observations:
             self.inspector.tabs.setCurrentIndex(self.inspector.frames_tab_index)
+            if keep_frame and self.scene.current_frame is not None:
+                self.inspector.select_frame(self.scene.current_frame)
         if fly and n is not None:
             self.scene.focus(n.id)
 
-    def _mark_frame(self, f: model.Frame):
-        self.scene._drop("frame")
-        if f.position is not None:
-            import pyvista as pv
-            a = self.plotter.add_mesh(pv.Sphere(radius=0.12, center=f.position), color="#1b998b",
-                                      pickable=False, reset_camera=False)
-            self.scene._add("frame", a)
-            self.plotter.render()
+    def show_frame(self, frame_id: int, from_inspector=False, from_camera=False):
+        """Show a recorded frame: RGB / depth in the camera panel, its camera pose in 3D."""
+        if self.graph is None or self.graph.observations is None:
+            return
+        f = self.graph.observations.frames.get(frame_id)
+        if f is None:
+            return
+        self.scene.show_frame(frame_id)
+        if not from_camera:
+            self.camera.show_frame(frame_id)
+            if not self.camera_dock.isVisible():
+                self.camera_dock.show()
+        if not from_inspector and self.inspector._node is not None and self.inspector._node.id == f.node_id:
+            self.inspector.select_frame(frame_id)
+        msg = f"frame {frame_id}"
+        if f.mapping.get("node_symbol"):
+            msg += f" → agent node {f.mapping['node_symbol']}"
+        self.statusBar().showMessage(msg)
 
     def _set_opt(self, **kw):
         for k, v in kw.items():
@@ -549,8 +535,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self._press = None
         if abs(x - px) + abs(y - py) > 4:
             return  # a drag (rotate), not a click
-        nid = self.scene.pick(x, y)
-        if nid is not None:
+        nid, d_node = self.scene.pick_with_distance(x, y)
+        fid, d_frame = self.scene.pick_frame(x, y)
+        node_is_agent = nid is not None and self.graph.nodes[nid].group == "Agents"
+        # a click on the trajectory shows that camera position's frame; other nodes win when closer
+        if fid is not None and (nid is None or node_is_agent or d_frame < d_node):
+            self.show_frame(fid)
+        elif nid is not None:
             self.select_node(nid)
 
     def closeEvent(self, e):
@@ -563,6 +554,7 @@ def main(argv=None):
     parser.add_argument("path", nargs="?", help="dsg.json, dsg_with_mesh.json or a session folder")
     parser.add_argument("--screenshot", help=argparse.SUPPRESS)  # smoke test: render, save, quit
     parser.add_argument("--select", help=argparse.SUPPRESS)  # smoke test: select a node symbol
+    parser.add_argument("--frame", type=int, help=argparse.SUPPRESS)  # smoke test: show a frame id
     args = parser.parse_args(argv)
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv[:1])
     app.setApplicationName("DSG Viewer")
@@ -577,6 +569,8 @@ def main(argv=None):
                 w.select_node(nid, fly=False)
                 if w.inspector.frames.count():
                     w.inspector.frames.setCurrentRow(0)
+            if args.frame is not None:
+                w.show_frame(args.frame)
             def save():
                 w.grab().save(args.screenshot)
                 w.plotter.screenshot(str(pathlib.Path(args.screenshot).with_suffix("")) + "_3d.png")

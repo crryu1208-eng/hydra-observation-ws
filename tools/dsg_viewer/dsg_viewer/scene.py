@@ -20,6 +20,26 @@ GROUP_STYLE = {  # color, point size (px)
 }
 DEFAULT_STYLE = ("#888888", 8)
 SELECT_COLOR = "#ffd166"
+FRAME_COLOR = "#e63973"
+
+
+def quat_matrix(q_wxyz) -> np.ndarray:
+    w, x, y, z = np.asarray(q_wxyz, float) / np.linalg.norm(q_wxyz)
+    return np.array([[1 - 2 * (y * y + z * z), 2 * (x * y - w * z), 2 * (x * z + w * y)],
+                     [2 * (x * y + w * z), 1 - 2 * (x * x + z * z), 2 * (y * z - w * x)],
+                     [2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y)]])
+
+
+def frustum(t, q_wxyz, intr, depth: float = 0.45) -> pv.PolyData:
+    """Camera pyramid in world coordinates (optical frame: x right, y down, z forward)."""
+    w, h, fx, fy, cx, cy = (intr.width, intr.height, intr.fx, intr.fy, intr.cx, intr.cy) if intr else \
+        (640, 480, 600.0, 600.0, 320.0, 240.0)
+    corners = np.array([[(u - cx) / fx * depth, (v - cy) / fy * depth, depth]
+                        for u, v in ((0, 0), (w, 0), (w, h), (0, h))])
+    pts = np.vstack([np.zeros(3), corners, [[0, -0.25 * depth, depth]]])  # last point: "up" tick
+    pts = pts @ quat_matrix(q_wxyz).T + np.asarray(t, float)
+    pairs = [(0, 1), (0, 2), (0, 3), (0, 4), (1, 2), (2, 3), (3, 4), (4, 1)]
+    return _lines(pts, pairs)
 
 
 def label_color(label: int | str) -> tuple[float, float, float]:
@@ -74,6 +94,9 @@ class SceneView:
         self.selected: int | None = None
         self._ids = np.zeros(0, dtype=np.int64)  # node ids in display order (for picking)
         self._pos = np.zeros((0, 3))
+        self._frame_ids = np.zeros(0, dtype=np.int64)  # recorded frames on the trajectory (for picking)
+        self._frame_pos = np.zeros((0, 3))
+        self.current_frame: int | None = None
 
     # ---- geometry helpers -------------------------------------------------------------
     def display_pos(self, n: Node) -> np.ndarray:
@@ -93,6 +116,7 @@ class SceneView:
             self._drop(k)
         self.g = g
         self.selected = None
+        self.current_frame = None
         self.rebuild()
         self.p.reset_camera()
         self.p.render()
@@ -108,6 +132,7 @@ class SceneView:
         self._build_paths()
         self._build_boxes()
         self._build_selection()
+        self._build_frame_marker()
         self.p.render()
 
     def _build_mesh(self):
@@ -191,6 +216,15 @@ class SceneView:
             self._add("edges", a)
 
     def _build_paths(self):
+        self._frame_ids = np.zeros(0, dtype=np.int64)
+        self._frame_pos = np.zeros((0, 3))
+        obs = self.g.observations
+        path_shown = self.opt.agent_path and "Agents" not in self.opt.hidden_groups
+        if obs is not None and (path_shown or self.opt.frame_path):
+            ids = [i for i in obs.ordered if obs.frames[i].position is not None]
+            if ids:
+                self._frame_ids = np.array(ids, dtype=np.int64)
+                self._frame_pos = np.array([obs.frames[i].position for i in ids])
         if self.opt.agent_path and "Agents" not in self.opt.hidden_groups:
             path = self.g.agent_path()
             if len(path) > 1:
@@ -242,6 +276,25 @@ class SceneView:
                                 color=SELECT_COLOR, line_width=4, pickable=False, reset_camera=False)
             self._add("selection", a)
 
+    def _build_frame_marker(self):
+        self._drop("frame")
+        obs = self.g.observations if self.g else None
+        f = obs.frames.get(self.current_frame) if obs and self.current_frame is not None else None
+        if f is None or f.position is None:
+            return
+        a = self.p.add_mesh(pv.PolyData(np.asarray(f.position, float)[None]), color=FRAME_COLOR, point_size=16,
+                            render_points_as_spheres=True, pickable=False, reset_camera=False)
+        self._add("frame", a)
+        if f.world_T_sensor is not None:
+            a = self.p.add_mesh(frustum(*f.world_T_sensor, obs.intrinsics), color=FRAME_COLOR, line_width=3,
+                                pickable=False, reset_camera=False)
+            self._add("frame", a)
+
+    def show_frame(self, frame_id: int | None):
+        self.current_frame = frame_id
+        self._build_frame_marker()
+        self.p.render()
+
     # ---- interaction -----------------------------------------------------------------
     def select(self, node_id: int | None):
         self.selected = node_id
@@ -260,18 +313,19 @@ class SceneView:
         self.p.reset_camera_clipping_range()
         self.p.render()
 
-    def pick(self, x: int, y: int, radius_px: float = 12.0) -> int | None:
-        """Node nearest to display pixel (x, y; origin bottom-left) within radius, preferring nearer depth."""
-        if len(self._pos) == 0:
-            return None
+    def _nearest_on_screen(self, pos: np.ndarray, x: int, y: int, radius_px: float):
+        """Index of the point nearest to display pixel (x, y; origin bottom-left) within radius
+        (ties broken by depth), and its pixel distance."""
+        if len(pos) == 0:
+            return None, None
         ren = self.p.renderer
         w, h = ren.GetSize()
         if w == 0 or h == 0:
-            return None
+            return None, None
         cam = ren.GetActiveCamera()
         m = cam.GetCompositeProjectionTransformMatrix(w / h, -1, 1)
         M = np.array([[m.GetElement(i, j) for j in range(4)] for i in range(4)])
-        hom = np.c_[self._pos, np.ones(len(self._pos))] @ M.T
+        hom = np.c_[pos, np.ones(len(pos))] @ M.T
         valid = hom[:, 3] > 1e-9
         ndc = hom[:, :3] / np.where(valid, hom[:, 3], 1)[:, None]
         ox, oy = ren.GetOrigin()
@@ -280,7 +334,21 @@ class SceneView:
         d = np.hypot(px - x, py - y)
         ok = valid & (np.abs(ndc[:, 2]) <= 1) & (d <= radius_px)
         if not ok.any():
-            return None
+            return None, None
         cand = np.flatnonzero(ok)
         best = cand[np.lexsort((ndc[cand, 2], np.round(d[cand] / 4)))][0]
-        return int(self._ids[best])
+        return int(best), float(d[best])
+
+    def pick(self, x: int, y: int, radius_px: float = 12.0) -> int | None:
+        """Node nearest to display pixel (x, y)."""
+        i, _ = self._nearest_on_screen(self._pos, x, y, radius_px)
+        return None if i is None else int(self._ids[i])
+
+    def pick_with_distance(self, x: int, y: int, radius_px: float = 12.0):
+        i, d = self._nearest_on_screen(self._pos, x, y, radius_px)
+        return (None, None) if i is None else (int(self._ids[i]), d)
+
+    def pick_frame(self, x: int, y: int, radius_px: float = 10.0):
+        """Recorded frame whose camera position is nearest to display pixel (x, y), and its distance."""
+        i, d = self._nearest_on_screen(self._frame_pos, x, y, radius_px)
+        return (None, None) if i is None else (int(self._frame_ids[i]), d)

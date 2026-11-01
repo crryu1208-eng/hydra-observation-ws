@@ -74,8 +74,25 @@ class Frame:
     timestamp_ns: int
     rgb_path: pathlib.Path | None
     depth_path: pathlib.Path | None
-    position: np.ndarray | None
+    position: np.ndarray | None  # world_T_body translation (loop-closure corrected when available)
     mapping: dict
+    world_T_sensor: tuple[np.ndarray, np.ndarray] | None = None  # (t, q_wxyz) of the camera optical frame
+
+    @property
+    def node_id(self) -> int | None:
+        nid = (self.mapping or {}).get("node_id")
+        return int(nid) if nid is not None else None
+
+
+@dataclass
+class Intrinsics:
+    width: int
+    height: int
+    fx: float
+    fy: float
+    cx: float
+    cy: float
+    max_range: float | None = None
 
 
 @dataclass
@@ -83,6 +100,8 @@ class Observations:
     root: pathlib.Path
     frames: dict[int, Frame]
     node_frames: dict[int, list[int]]  # agent node id -> frame ids
+    intrinsics: Intrinsics | None = None
+    ordered: list[int] = field(default_factory=list)  # frame ids in time order
 
     def frames_of(self, node_id: int) -> list[Frame]:
         return [self.frames[i] for i in self.node_frames.get(node_id, []) if i in self.frames]
@@ -160,7 +179,9 @@ def load_observations(obs_dir: pathlib.Path) -> Observations | None:
             d = json.loads(line)
             if d.get("status") != "written":
                 continue
-            pose = (d.get("corrected") or {}).get("world_T_body") or d.get("world_T_body")
+            corrected = d.get("corrected") or {}
+            pose = corrected.get("world_T_body") or d.get("world_T_body")
+            sensor = corrected.get("world_T_sensor") or d.get("world_T_sensor")
             frames[d["frame_id"]] = Frame(
                 frame_id=d["frame_id"],
                 timestamp_ns=int(d["timestamp_ns"]),
@@ -168,13 +189,25 @@ def load_observations(obs_dir: pathlib.Path) -> Observations | None:
                 depth_path=obs_dir / d["depth_path"] if d.get("depth_path") else None,
                 position=np.asarray(pose["t"], dtype=float) if pose else None,
                 mapping=d.get("mapping") or {},
+                world_T_sensor=(np.asarray(sensor["t"], float), np.asarray(sensor["q_wxyz"], float))
+                if sensor else None,
             )
     node_frames: dict[int, list[int]] = {}
     agent_file = obs_dir / "agent_frames.json"
     if agent_file.exists():
         for key, v in json.loads(agent_file.read_text()).items():
             node_frames[int(key)] = list(v.get("frames", []))
-    return Observations(obs_dir, frames, node_frames)
+    intrinsics = None
+    calib_file = obs_dir / "camera_calib.json"
+    if calib_file.exists():
+        try:
+            c = next(iter(json.loads(calib_file.read_text())["sensors"].values()))
+            intrinsics = Intrinsics(int(c["width"]), int(c["height"]), float(c["fx"]), float(c["fy"]),
+                                    float(c["cx"]), float(c["cy"]), c.get("max_range"))
+        except (KeyError, StopIteration, TypeError, ValueError):
+            intrinsics = None
+    ordered = [f.frame_id for f in sorted(frames.values(), key=lambda f: (f.timestamp_ns, f.frame_id))]
+    return Observations(obs_dir, frames, node_frames, intrinsics, ordered)
 
 
 def load(path: str | pathlib.Path) -> SceneGraph:
