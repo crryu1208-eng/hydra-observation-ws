@@ -9,12 +9,26 @@
 #    odom -> camera_link following the optimized trajectory (scripts/apply_loop_closures.py)
 # 3. run scripts/reprocess_d435i_bag.sh on it -> <session>_lc_reproc/{observations,hydra,logs}
 # Env: SKIP_REPROCESS=1 stops after step 2.
+#      KEYFRAMES=all makes every synchronized frame (15 Hz) a keyframe, without merging similar
+#      consecutive frames or skipping small motions, so each Hydra agent node has an RTAB-Map node
+#      at the same stamp (scripts/compare_keyframes.py); output goes to <session>_lcall.
+#      The short-term memory then holds 75 nodes (5 s, as 10 nodes do at 2 Hz): nodes in it are not
+#      proximity / loop-closure candidates, so frames a moment apart are not registered to each other.
+#      TAG=<name> appends _<name> to the output folder (keeps earlier runs for comparison).
 set -eo pipefail
 SESSION="${1:?usage: loop_close_d435i_bag.sh <session> [play_rate]}"
 RATE="${2:-1.0}"
 WS=/root/hydra_ws
 SRC=/root/data/d435i/$SESSION
-OUT=${SRC}_lc
+KEYFRAMES="${KEYFRAMES:-sparse}"
+case "$KEYFRAMES" in
+  sparse) OUT=${SRC}_lc; KF_PARAMS=(-p "Rtabmap/DetectionRate:='2'") ;;
+  all) OUT=${SRC}_lcall; KF_PARAMS=(-p "Rtabmap/DetectionRate:='0'" -p "Mem/RehearsalSimilarity:='1.0'"
+                                    -p "RGBD/LinearUpdate:='0'" -p "RGBD/AngularUpdate:='0'"
+                                    -p "Mem/STMSize:='${STM_SIZE:-75}'") ;;
+  *) echo "KEYFRAMES must be sparse or all"; exit 1 ;;
+esac
+OUT=${OUT}${TAG:+_$TAG}
 CAM=/camera/camera
 
 [ -d "$SRC/bag" ] || { echo "no bag in $SRC"; exit 1; }
@@ -26,19 +40,22 @@ mkdir -p "$OUT/rtabmap" "$OUT/logs"
 LOGS=$OUT/logs
 
 python3 $WS/scripts/apply_loop_closures.py "$SRC/bag" "$OUT/slam_input" --filter-slam-input \
-  $CAM/color/image_raw $CAM/color/camera_info $CAM/aligned_depth_to_color/image_raw /rtabmap/odom /tf_static \
+  $CAM/color/image_raw $CAM/color/camera_info $CAM/aligned_depth_to_color/image_raw /rtabmap/odom /tf /tf_static \
   2> "$LOGS/filter.log" | tee "$LOGS/slam_input.json"
 
-# rtabmap_slam on the recorded odometry; keyframes at 2 Hz, the rest of RTAB-Map's defaults
+# rtabmap_slam on the recorded odometry; keyframes at 2 Hz (or every frame), the rest of RTAB-Map's defaults
 # (global loop closures by bag-of-words, local proximity detection, graph optimization)
 # run the binary directly (not via ros2 run) so SIGINT reaches it and it saves the database
+# odom_sensor_sync off: images and odometry carry the same stamps (exact sync). /tf stays in the SLAM
+# input: rtabmap looks up odom -> camera_link for every frame and, without it, waits
+# wait_for_transform (0.2 s sim time) each time, which at 15 Hz overflows the input queue
 /opt/ros/jazzy/lib/rtabmap_slam/rtabmap -d --ros-args -r __ns:=/rtabmap -p use_sim_time:=true \
   -p frame_id:=camera_link -p map_frame_id:=map -p publish_tf:=false \
-  -p subscribe_depth:=true -p subscribe_rgb:=true -p approx_sync:=false \
+  -p subscribe_depth:=true -p subscribe_rgb:=true -p approx_sync:=false -p odom_sensor_sync:=false \
   -p qos:=1 -p qos_image:=1 -p qos_camera_info:=1 -p qos_odom:=1 \
   -p topic_queue_size:=30 -p sync_queue_size:=30 \
   -p database_path:=$OUT/rtabmap/rtabmap.db \
-  -p "Rtabmap/DetectionRate:='2'" -p "Mem/IncrementalMemory:='true'" \
+  "${KF_PARAMS[@]}" -p "Mem/IncrementalMemory:='true'" \
   -r rgb/image:=$CAM/color/image_raw -r depth/image:=$CAM/aligned_depth_to_color/image_raw \
   -r rgb/camera_info:=$CAM/color/camera_info -r odom:=/rtabmap/odom \
   < /dev/null > "$LOGS/rtabmap.log" 2>&1 &
@@ -92,5 +109,5 @@ python3 $WS/scripts/apply_loop_closures.py "$SRC/bag" "$POSES" "$OUT/bag" | tee 
 echo "corrected bag: $OUT/bag"
 
 if [ "${SKIP_REPROCESS:-0}" != 1 ]; then
-  bash $WS/scripts/reprocess_d435i_bag.sh "${SESSION}_lc"
+  bash $WS/scripts/reprocess_d435i_bag.sh "$(basename "$OUT")"
 fi

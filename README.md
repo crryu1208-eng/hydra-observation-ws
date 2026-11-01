@@ -33,6 +33,7 @@ Tested on Ubuntu 26.04, RTX 3080 Ti Laptop, NVIDIA driver 595.99, ROS 2 Jazzy (c
 | `config/uhumans2_*.yaml` | Hydra and input config for uHumans2 (deep queues, recorder on) |
 | `scripts/run_d435i_obs.sh` | one handheld session: camera, bag, Hydra, drain, mapping, verification |
 | `scripts/loop_close_d435i_bag.sh`, `scripts/apply_loop_closures.py` | offline RTAB-Map SLAM loop closure, then rebuild the scene graph on the corrected trajectory |
+| `scripts/compare_keyframes.py` | matches Hydra agent nodes to per-frame RTAB-Map keyframes and compares their poses and loop closures |
 | `scripts/reprocess_d435i_bag.sh` | re-runs segmentation + Hydra on a session bag without dropping frames |
 | `scripts/run_uhumans2_obs.sh` | lossless uHumans2 run |
 | `scripts/d435i_monitor.py` | live tracking status; resets odometry if it stays lost before recording |
@@ -145,6 +146,34 @@ Requires `ros-jazzy-rtabmap-slam` in the container. Results:
 After a tracking loss the odometry restarts with a high covariance. RTAB-Map then starts a new
 sub-map, and a loop closure links it back to the earlier ones. A sub-map with no loop closure
 drops out of the export; the correction is interpolated across it.
+
+#### Keyframes at every frame (analysis)
+
+`KEYFRAMES=all` makes every synchronized frame (15 Hz) an RTAB-Map keyframe, so each Hydra agent
+node has a keyframe at the same image stamp. `compare_keyframes.py` then reports, per agent node,
+the odometry, optimized and scene-graph poses, and maps every loop closure to agent nodes:
+
+```bash
+docker exec -e KEYFRAMES=all -e SKIP_REPROCESS=1 hydra-dev \
+  bash /root/hydra_ws/scripts/loop_close_d435i_bag.sh office_walk6 0.3     # -> office_walk6_lcall
+docker exec hydra-dev bash -c "cd /root/data/d435i && python3 /root/hydra_ws/scripts/compare_keyframes.py \
+  office_walk6_lc_reproc/hydra/backend/dsg.json office_walk6_lcall/rtabmap/rtabmap.db \
+  office_walk6_lcall/rtabmap/slam_poses.txt office_walk6_lcall/compare \
+  --sparse-poses office_walk6_lc/rtabmap/slam_poses.txt"
+```
+
+`STM_SIZE` sets the short-term memory (default 75 nodes = 5 s at 15 Hz; nodes in it are not
+proximity candidates) and `TAG` suffixes the output folder. office_walk6, per keyframe:
+
+| run | median time, first / last quarter | revisit loop closures | vs 2 Hz after rigid alignment |
+|---|---|---|---|
+| 2 Hz | 37 / 42 ms | 7 | – |
+| 15 Hz, STM 10 | 87 / 179 ms | 75 | 0.12 m |
+| 15 Hz, STM 75 | 37 / 168 ms | 389 | 0.29 m |
+
+The last quarter is the return to the start, where proximity registration against the first pass
+takes about 90 ms, so 15 Hz keyframes need a slowed-down replay (0.3x). 98 of 115 agent nodes match
+a keyframe; the other 17 fall on frames without valid odometry (tracking lost).
 
 ### Notes from testing
 
