@@ -32,6 +32,7 @@ Tested on Ubuntu 26.04, RTX 3080 Ti Laptop, NVIDIA driver 595.99, ROS 2 Jazzy (c
 | `config/d435i_*.yaml` | Hydra and input config for the D435i |
 | `config/uhumans2_*.yaml` | Hydra and input config for uHumans2 (deep queues, recorder on) |
 | `scripts/run_d435i_obs.sh` | one handheld session: camera, bag, Hydra, drain, mapping, verification |
+| `scripts/loop_close_d435i_bag.sh`, `scripts/apply_loop_closures.py` | offline RTAB-Map SLAM loop closure, then rebuild the scene graph on the corrected trajectory |
 | `scripts/reprocess_d435i_bag.sh` | re-runs segmentation + Hydra on a session bag without dropping frames |
 | `scripts/run_uhumans2_obs.sh` | lossless uHumans2 run |
 | `scripts/d435i_monitor.py` | live tracking status; resets odometry if it stays lost before recording |
@@ -75,7 +76,7 @@ are lost when the container is recreated:
 
 ```bash
 docker exec hydra-dev bash -c "apt-get update && apt-get install -y \
-  ros-jazzy-realsense2-camera ros-jazzy-rtabmap-odom ros-jazzy-imu-filter-madgwick"
+  ros-jazzy-realsense2-camera ros-jazzy-rtabmap-odom ros-jazzy-rtabmap-slam ros-jazzy-imu-filter-madgwick"
 ```
 
 ## Handheld D435i session
@@ -115,6 +116,35 @@ Output goes to `<session>_reproc/`, with the same layout as a live session. The 
 `d435i_obs.launch.yaml` with `odometry:=false use_sim_time:=true`. In office_walk5 it recorded
 2143 of 2207 camera frames, against 961 live. The 64 missing frames are the ones without a
 pose (before odometry started, or while it was lost) or without depth.
+
+### Loop closure (RTAB-Map SLAM)
+
+The live pipeline runs only RTAB-Map odometry, so drift accumulates. In office_walk5 the end of
+the walk was 17 m from the start in odometry, because of 9 tracking losses. This step corrects it
+offline:
+
+```bash
+docker exec hydra-dev bash /root/hydra_ws/scripts/loop_close_d435i_bag.sh <session> [play_rate]
+```
+
+1. The session bag (images plus the live odometry, without the null poses published while
+   lost) is played into `rtabmap_slam`. It detects loop closures and optimizes its keyframe
+   graph.
+2. `scripts/apply_loop_closures.py` exports the optimized keyframe poses and writes
+   `<session>_lc/bag`. Its odom → camera_link TF follows the optimized trajectory, with the
+   correction interpolated between keyframes.
+3. `reprocess_d435i_bag.sh` builds the scene graph on that bag in `<session>_lc_reproc/`.
+
+Requires `ros-jazzy-rtabmap-slam` in the container. Results:
+
+| session | loop closures | start-to-end distance, odometry → SLAM |
+|---|---|---|
+| office_walk3 | 35 | 0.49 m → 0.41 m (height 0.12 m → 0.00 m) |
+| office_walk5 | 16 | 17.41 m → 0.71 m (height 1.83 m → 0.03 m) |
+
+After a tracking loss the odometry restarts with a high covariance. RTAB-Map then starts a new
+sub-map, and a loop closure links it back to the earlier ones. A sub-map with no loop closure
+drops out of the export; the correction is interpolated across it.
 
 ### Notes from testing
 
