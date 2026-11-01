@@ -38,6 +38,7 @@ Tested on Ubuntu 26.04, RTX 3080 Ti Laptop, NVIDIA driver 595.99, ROS 2 Jazzy (c
 | `scripts/verify_d435i.py`, `scripts/verify_observations.py` | check that frames were recorded and mapped |
 | `scripts/export_efficientvit_onnx.py` | exports the ADE20K segmentation model to ONNX |
 | `scripts/count_topics.py` | per-topic message counts (rate check) |
+| `tools/dsg_viewer/` | Qt app to navigate a scene graph: mesh, layers, nodes, edges, objects, trajectory, recorded frames |
 
 Not in git: `src/` (cloned by the setup script), `build/`, `install/`, `log/` and `.models/`.
 
