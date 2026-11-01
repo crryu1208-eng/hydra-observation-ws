@@ -24,6 +24,8 @@ from scipy.spatial.transform import Rotation, Slerp
 
 ODOM_TOPIC = "/rtabmap/odom"
 ODOM_FRAME, BODY_FRAME = "odom", "camera_link"
+RESET_VARIANCE = 9999.0  # rtabmap_slam starts a new map at or above this odometry variance
+GAP_VARIANCE = [0.25, 0.25, 0.25, 0.1, 0.1, 0.1]  # x y z (m^2), roll pitch yaw (rad^2): 0.5 m, 18 deg
 
 
 def mat(t, q_xyzw):
@@ -70,17 +72,31 @@ def filter_slam_input(src_bag, out_bag, topics):
     for meta in reader.get_all_topics_and_types():
         if meta.name in topics:
             writer.create_topic(meta)
-    dropped = 0
+    dropped = softened = 0
     while reader.has_next():
         topic, data, t = reader.read_next()
         if topic not in topics:
             continue
-        if topic == ODOM_TOPIC and not is_valid(deserialize_message(data, Odometry)):
-            dropped += 1
-            continue
+        if topic == ODOM_TOPIC:
+            m = deserialize_message(data, Odometry)
+            if not is_valid(m):
+                dropped += 1
+                continue
+            if m.pose.covariance[0] >= RESET_VARIANCE:
+                # first pose after an odometry reset: rtabmap_slam would start a new map and the
+                # two parts would be joined only where a loop closure happens to link them. Keep
+                # one graph instead, with an uncertain link across the gap (motion during the
+                # tracking loss is unknown) that the optimizer can stretch.
+                cov = [0.0] * 36
+                for i, v in enumerate(GAP_VARIANCE):
+                    cov[i * 7] = v
+                m.pose.covariance = cov
+                m.twist.covariance = cov
+                data = serialize_message(m)
+                softened += 1
         writer.write(topic, data, t)
     del writer
-    print(json.dumps({"null_odometry_dropped": dropped}))
+    print(json.dumps({"null_odometry_dropped": dropped, "reset_links_softened": softened}))
 
 
 def read_odom(bag):
