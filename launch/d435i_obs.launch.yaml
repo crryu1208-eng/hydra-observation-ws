@@ -8,12 +8,17 @@ launch:
   - arg: {name: log_path, default: /root/data/d435i/default/hydra}
   - arg: {name: observation_path, default: /root/data/d435i/default/observations}
   - arg: {name: start_visualizer, default: 'false'}
+  # bag reprocessing: odometry:=false (the bag's /tf already has odom -> camera_link from the
+  # live RTAB-Map run) and use_sim_time:=true (bag played with --clock)
+  - arg: {name: odometry, default: 'true'}
+  - arg: {name: use_sim_time, default: 'false'}
   - let: {name: rgb, value: $(var camera_ns)/color/image_raw}
   - let: {name: depth, value: $(var camera_ns)/aligned_depth_to_color/image_raw}
   - let: {name: info, value: $(var camera_ns)/color/camera_info}
 
   # pose: RTAB-Map visual odometry, publishes odom -> camera_link
   - node:
+      if: $(var odometry)
       pkg: rtabmap_odom
       exec: rgbd_odometry
       name: rgbd_odometry
@@ -50,6 +55,7 @@ launch:
 
   # orientation for the raw D435i IMU (gyro + accel, no magnetometer)
   - node:
+      if: $(var odometry)
       pkg: imu_filter_madgwick
       exec: imu_filter_madgwick_node
       name: imu_filter
@@ -91,9 +97,12 @@ launch:
         - {name: input_config_path, value: /root/hydra_ws/config/d435i_input_obs.yaml}
         - {name: log_path, value: $(var log_path)}
         - {name: start_visualizer, value: $(var start_visualizer)}
+        - {name: use_sim_time, value: $(var use_sim_time)}
         - {name: extra_yaml, value: '{active_window: {observation_recorder: {output_path: $(var observation_path)}}}'}
   - node:
       pkg: tf2_ros
       name: odom_to_map
       exec: static_transform_publisher
       args: --frame-id odom --child-frame-id map
+      param:
+        - {name: use_sim_time, value: $(var use_sim_time)}

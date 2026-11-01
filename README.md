@@ -32,6 +32,7 @@ Tested on Ubuntu 26.04, RTX 3080 Ti Laptop, NVIDIA driver 595.99, ROS 2 Jazzy (c
 | `config/d435i_*.yaml` | Hydra and input config for the D435i |
 | `config/uhumans2_*.yaml` | Hydra and input config for uHumans2 (deep queues, recorder on) |
 | `scripts/run_d435i_obs.sh` | one handheld session: camera, bag, Hydra, drain, mapping, verification |
+| `scripts/reprocess_d435i_bag.sh` | re-runs segmentation + Hydra on a session bag without dropping frames |
 | `scripts/run_uhumans2_obs.sh` | lossless uHumans2 run |
 | `scripts/d435i_monitor.py` | live tracking status; resets odometry if it stays lost before recording |
 | `scripts/verify_d435i.py`, `scripts/verify_observations.py` | check that frames were recorded and mapped |
@@ -98,6 +99,21 @@ Output in `/root/data/d435i/<session>/` (host: `~/hydra_data/d435i/<session>/`):
 | `observations/` | recorded frames, `frames.jsonl` with poses and node mapping, `agent_frames.json` |
 | `hydra/` | scene graph (`backend/dsg.json`) and Hydra logs |
 | `logs/` | launch logs, `verify.log`, `tracking_lost_frames.txt` |
+
+### Reprocessing from the bag
+
+The live run can lose frames when segmentation falls behind the camera. In office_walk5, run on
+battery with the GPU power-capped, Hydra got no input for 78 s. The bag has every camera frame
+and the live odometry in `/tf`. Replaying it slowly gives a lossless result:
+
+```bash
+docker exec hydra-dev bash /root/hydra_ws/scripts/reprocess_d435i_bag.sh <session> [play_rate]   # default 0.5
+```
+
+Output goes to `<session>_reproc/`, with the same layout as a live session. The script launches
+`d435i_obs.launch.yaml` with `odometry:=false use_sim_time:=true`. In office_walk5 it recorded
+2143 of 2207 camera frames, against 961 live. The 64 missing frames are the ones without a
+pose (before odometry started, or while it was lost) or without depth.
 
 ### Notes from testing
 
