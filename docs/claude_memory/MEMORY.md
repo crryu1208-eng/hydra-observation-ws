@@ -1,3 +1,0 @@
-- [Hydra env status](hydra-env-status.md) — Hydra docker setup, D435i pipeline, sessions, commits, loop closure history (to 2026-11-01)
-- [RTAB-Map keyframe analysis](rtabmap-keyframe-analysis.md) — 15 Hz keyframes vs agent nodes on walk6: /tf wait pitfall, timing, accuracy, conclusions
-- [User working style](user-working-style.md) — Korean replies; commit/push and deletes only when asked; report long runs when done
