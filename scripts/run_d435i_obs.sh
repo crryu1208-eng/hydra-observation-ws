@@ -33,6 +33,9 @@ if [ -e "$OUT" ]; then echo "$OUT already exists"; exit 1; fi
 source /opt/ros/jazzy/setup.bash
 source $WS/install/setup.bash
 export SEMANTIC_INFERENCE_MODEL_DIR=$WS/.models
+# keep DDS on this machine: the container uses host networking, and a handheld session
+# unplugs the laptop's network, which must not affect node-to-node traffic
+export ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST
 mkdir -p "$RUN_LOGS"
 : > "$RUN_LOGS/launch.log"  # wait_log greps it before hydra is launched
 
