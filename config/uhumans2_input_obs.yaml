@@ -1,0 +1,16 @@
+# copy of src/hydra_ros/hydra_ros/config/datasets/uhumans2.yaml with deeper image queues:
+# queue_size sets the ApproximateTime sync queue and (feature/observation-recorder branch of
+# hydra_ros) each color/depth/label subscription depth, so frames waiting on segmentation
+# are not dropped. tf_lookup.buffer_size_s covers the whole bag (506 s) so a lagging
+# pipeline never loses poses (default 30 s).
+---
+input:
+  type: RosInput
+  tf_verbosity: 1
+  clear_queue_on_fail: true
+  tf_lookup: {buffer_size_s: 600.0}
+  inputs:
+    left_cam:
+      receiver: {type: ClosedSetImageReceiver, queue_size: 200}
+      sensor: {type: camera_info, min_range: 0.1, max_range: 5.0, extrinsics: {type: ros, robot_frame: base_link_gt}}
+features: {type: FeatureReceiver}

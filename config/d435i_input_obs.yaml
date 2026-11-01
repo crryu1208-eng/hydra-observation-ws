@@ -1,0 +1,13 @@
+# Hydra ROS input for a handheld D435i (realsense2_camera, aligned depth) with RTAB-Map
+# RGB-D odometry providing odom -> camera_link. Same lossless queue settings as
+# uhumans2_input_obs.yaml: deep receiver queue and a TF buffer longer than any backlog.
+---
+input:
+  type: RosInput
+  tf_verbosity: 1
+  clear_queue_on_fail: true
+  tf_lookup: {buffer_size_s: 600.0}
+  inputs:
+    camera:
+      receiver: {type: ClosedSetImageReceiver, queue_size: 200}
+      sensor: {type: camera_info, min_range: 0.2, max_range: 4.0, extrinsics: {type: ros, robot_frame: camera_link}}

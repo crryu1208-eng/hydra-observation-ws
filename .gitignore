@@ -1,0 +1,15 @@
+# cloned by setup_workspace.sh (code changes are on the forks' feature/observation-recorder)
+/src/
+# colcon
+/build/
+/install/
+/log/
+colcon_build.log
+# segmentation model weights, ONNX and TensorRT engines
+/.models/
+# superseded by the fork branches
+/patches/
+/hydra-observation-recorder.patch
+# copy of the Hydra fork's doc/observation_recording.md
+/observation_recording.md
+__pycache__/

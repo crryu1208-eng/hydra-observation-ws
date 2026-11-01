@@ -1,0 +1,11 @@
+config_utilities	https://github.com/MIT-SPARK/config_utilities.git	1df5f6b
+hydra	https://github.com/MIT-SPARK/Hydra.git	2e58a35b
+hydra_ros	https://github.com/MIT-SPARK/Hydra-ROS.git	8f3b7e3
+ianvs	https://github.com/MIT-SPARK/Ianvs.git	c204dec
+kimera_pgmo	https://github.com/MIT-SPARK/Kimera-PGMO.git	382b1f3
+kimera_rpgo	https://github.com/MIT-SPARK/Kimera-RPGO.git	222ad5e
+pose_graph_tools	https://github.com/MIT-SPARK/pose_graph_tools.git	965dfe8
+semantic_inference	https://github.com/MIT-SPARK/semantic_inference.git	f4ca55c
+spark_dsg	https://github.com/MIT-SPARK/Spark-DSG.git	3c40997
+spatial_hash	https://github.com/MIT-SPARK/Spatial-Hash.git	8045892
+teaser_plusplus	https://github.com/MIT-SPARK/TEASER-plusplus.git	52a9c52
