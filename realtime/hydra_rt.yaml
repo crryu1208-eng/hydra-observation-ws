@@ -1,0 +1,134 @@
+# Realtime variant of config/d435i_obs.yaml (15 fps target at 1280x720):
+# - full_update_separation_s: TSDF integration and observation recording stay at every frame, the
+#   mesh / frontend (objects, places, mesh compression) update at most every 0.2 s; their cost grows
+#   with the map (60 s office walk: frontend 8 -> 66 ms per update), so at 15 Hz they fell behind
+# - depth saved as 16-bit PNG in millimeters (the D435i's native unit, lossless) instead of
+#   float32 TIFF: 3.5 MB -> 0.4 MB per frame
+# - 4 writer threads (PNG encoding is CPU bound: one thread managed only ~11 fps of 720p RGB +
+#   depth PNGs and blocked Hydra 40 s in a 60 s run) and a deeper queue for disk flushes
+# output_path is overridden per run
+---
+map_window:
+  type: spatial
+  max_radius_m: 8.0
+active_window:
+  full_update_separation_s: 0.2
+  observation_recorder:
+    enable: true
+    output_path: /root/data/hydra_observations/d435i
+    queue_full_policy: block
+    max_queue_frames: 64
+    max_queue_bytes: 1073741824
+    save_depth: true
+    depth_format: png_u16_mm
+    png_compression: 1
+    num_writer_threads: 4
+  volumetric_map:
+    voxels_per_side: 16
+    voxel_size: 0.1
+    truncation_distance: 0.3
+  tsdf:
+    interpolation_method:
+      type: adaptive
+      max_depth_difference_m: 0.5
+    semantic_integrator:
+      type: MLESemanticIntegrator
+  mesh:
+    min_weight: 0.5
+frontend:
+  pgmo:
+    time_horizon: 15.0
+    d_graph_resolution: 2.5
+    mesh_resolution: 0.005
+  objects:
+    min_cluster_size: 20
+    cluster_tolerance: 0.20
+  surface_places:
+    type: place_2d
+    prefix: P
+    pure_final_place_size: 1
+    cluster_tolerance: .3
+    min_cluster_size: 50
+    max_cluster_size: 100000
+    min_final_place_points: 10
+    place_max_neighbor_z_diff: .5
+    place_overlap_threshold: 0.0
+  freespace_places:
+    type: gvd
+    filter_places: true
+    min_places_component_size: 3
+    filter_ground: false
+    gvd:
+      max_distance_m: 4.5
+      min_distance_m: 0.2
+      min_diff_m: 0.1
+      voronoi_config:
+        mode: L1_THEN_ANGLE
+        min_distance_m: 0.30
+        parent_l1_separation: 20
+        parent_cos_angle_separation: 0.2
+    graph:
+      type: CompressionGraphExtractor
+      compression_distance_m: 1.5
+      min_node_distance_m: 0.4
+      min_edge_distance_m: 0.25
+      node_merge_distance_m: 0.7
+      merge_policy: distance
+    tsdf_interpolator:
+      type: downsample
+      ratio: 2
+  use_frontiers: false
+backend:
+  add_places_to_deformation_graph: false  # `false` means that place meshes are not used in PGO
+  optimize_on_lc: true
+  max_external_loop_closure_time_difference: 1.0
+  enable_node_merging: true
+  update_functors:
+    agents:
+      type: UpdateAgentsFunctor
+    objects:
+      type: UpdateObjectsFunctor
+    surface_places:
+      type: Update2dPlacesFunctor
+    places:
+      type: UpdatePlacesFunctor
+    frontiers:
+      type: UpdateFrontiersFunctor
+    rooms:
+      type: UpdateRoomsFunctor
+      room_finder:
+        min_dilation_m: 0.5
+        max_dilation_m: 1.2
+        min_component_size: 10
+        min_room_size: 10
+        dilation_threshold_mode: PLATEAU
+        min_lifetime_length_m: 0.1
+        plateau_ratio: 0.15
+        clustering_mode: NEIGHBORS
+        dilation_diff_threshold_m: -1.0
+    buildings:
+      type: UpdateBuildingsFunctor
+  pgmo:
+    run_mode: FULL  # kimera_pgmo run mode FULL is required
+    embed_trajectory_delta_t: 5.0
+    num_interp_pts: 3
+    interp_horizon: 10.0
+    optimizer:
+      type: KimeraRpgoOptimizer
+      solver: LM
+      gnc:
+        inlier_probability: 0.9
+        mu_step: 1.6
+        max_iterations: 100
+    add_initial_prior: true
+    covariance:
+      odom: 1.0e-02
+      loop_close: 5.0e-02
+      sg_loop_close: 1.0e-01
+      prior: 1.0e-02
+      mesh_mesh: 1.0e-02
+      pose_mesh: 1.0e-02
+      place_mesh: 1.0e-02
+      place_edge: 10.0
+      place_merge: 10.0
+      object_merge: 10.0

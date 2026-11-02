@@ -1,0 +1,169 @@
+# realtime branch copy of launch/d435i_obs.launch.yaml with profiling switches.
+# Hydra + GPU segmentation + RTAB-Map RGB-D odometry for a handheld D435i.
+# The camera itself is started separately (see scripts/run_d435i_obs.sh) so the recording
+# can be stopped at the source while Hydra drains its queues.
+---
+launch:
+  - arg: {name: camera_ns, default: /camera/camera}
+  - arg: {name: labelspace, default: ade20k_full}
+  - arg: {name: log_path, default: /root/data/d435i/default/hydra}
+  - arg: {name: observation_path, default: /root/data/d435i/default/observations}
+  - arg: {name: start_visualizer, default: 'false'}
+  # bag reprocessing: odometry:=false (the bag's /tf already has odom -> camera_link from the
+  # live RTAB-Map run) and use_sim_time:=true (bag played with --clock)
+  - arg: {name: odometry, default: 'true'}
+  - arg: {name: use_sim_time, default: 'false'}
+  # RTAB-Map odometry image decimation: 2 at 1280x720 keeps feature detection at 640x360
+  - arg: {name: odom_image_decimation, default: '1'}
+  # profiling switches
+  - arg: {name: hydra, default: 'true'}
+  # live RTAB-Map SLAM (loop closure detection + graph optimization) on the odometry above;
+  # keyframes at slam_rate Hz, database at slam_db
+  - arg: {name: slam, default: 'false'}
+  - arg: {name: slam_rate, default: '2'}
+  - arg: {name: slam_db, default: /root/data/realtime/rtabmap.db}
+  - arg: {name: recorder, default: 'true'}
+  - arg: {name: segmentation, default: 'true'}
+  # segmentation speed: FP16 engine, inference resolution, debug image outputs
+  - arg: {name: seg_fp16, default: 'false'}
+  - arg: {name: seg_width, default: '-1'}
+  - arg: {name: seg_height, default: '-1'}
+  - arg: {name: seg_debug_images, default: 'true'}
+  - arg: {name: hydra_config, default: $(dirname)/../config/d435i_obs.yaml}
+  - arg: {name: input_config, default: $(dirname)/../config/d435i_input_obs.yaml}
+  - let: {name: rgb, value: $(var camera_ns)/color/image_raw}
+  - let: {name: depth, value: $(var camera_ns)/aligned_depth_to_color/image_raw}
+  - let: {name: info, value: $(var camera_ns)/color/camera_info}
+
+  # pose: RTAB-Map visual odometry, publishes odom -> camera_link
+  - node:
+      if: $(var odometry)
+      pkg: rtabmap_odom
+      exec: rgbd_odometry
+      name: rgbd_odometry
+      namespace: rtabmap
+      param:
+        - {name: frame_id, value: camera_link}
+        - {name: use_sim_time, value: $(var use_sim_time)}
+        - {name: odom_frame_id, value: odom}
+        - {name: publish_tf, value: true}
+        - {name: approx_sync, value: false}  # aligned depth carries the color stamp
+        # explicit reliable QoS (1): the default (0, system default) only reached ~3 Hz with
+        # realsense2_camera's reliable/transient_local publishers; with 1 odometry runs at 15 Hz
+        - {name: qos, value: 1}
+        - {name: qos_camera_info, value: 1}
+        - {name: topic_queue_size, value: 30}
+        - {name: sync_queue_size, value: 30}
+        - {name: wait_for_transform, value: 0.2}
+        # re-initialize at the last pose right after a lost frame instead of staying lost until
+        # the camera returns to the old view (office_walk2: lost at 11 s and never recovered;
+        # replayed with this setting: 3 lost updates out of 1164)
+        - {name: Odom/ResetCountdown, value: '1'}
+        # D435i IMU (orientation from imu_filter_madgwick below) as motion guess and gravity
+        # constraint; replaying office_walk2 it cut static drift from 5.3 cm to 1.3 cm
+        - {name: wait_imu_to_init, value: true}
+        - {name: always_check_imu_tf, value: true}
+        # fewer features (defaults 1000/2000): ~57 ms per frame alongside Hydra and segmentation
+        # left ~24% of frames without odometry at 15 Hz
+        - {name: Vis/MaxFeatures, value: '600'}
+        - {name: OdomF2M/MaxSize, value: '1200'}
+        - {name: Odom/ImageDecimation, value: "'$(var odom_image_decimation)'"}  # quoted: rtabmap params are strings
+      remap:
+        - {from: rgb/image, to: $(var rgb)}
+        - {from: depth/image, to: $(var depth)}
+        - {from: rgb/camera_info, to: $(var info)}
+        - {from: imu, to: /rtabmap/imu}
+
+  - node:
+      if: $(var slam)
+      pkg: rtabmap_slam
+      exec: rtabmap
+      name: rtabmap
+      namespace: rtabmap
+      args: -d
+      param:
+        - {name: use_sim_time, value: $(var use_sim_time)}
+        - {name: frame_id, value: camera_link}
+        - {name: map_frame_id, value: map}
+        - {name: publish_tf, value: false}  # Hydra gets loop closures, not a jumping map frame
+        - {name: subscribe_depth, value: true}
+        - {name: subscribe_rgb, value: true}
+        - {name: approx_sync, value: false}
+        - {name: odom_sensor_sync, value: false}
+        - {name: qos, value: 1}
+        - {name: qos_image, value: 1}
+        - {name: qos_camera_info, value: 1}
+        - {name: qos_odom, value: 1}
+        - {name: topic_queue_size, value: 30}
+        - {name: sync_queue_size, value: 30}
+        - {name: database_path, value: $(var slam_db)}
+        - {name: Rtabmap/DetectionRate, value: "'$(var slam_rate)'"}
+        - {name: Mem/IncrementalMemory, value: 'true'}
+      remap:
+        - {from: rgb/image, to: $(var rgb)}
+        - {from: depth/image, to: $(var depth)}
+        - {from: rgb/camera_info, to: $(var info)}
+        - {from: odom, to: /rtabmap/odom}
+
+  # orientation for the raw D435i IMU (gyro + accel, no magnetometer)
+  - node:
+      if: $(var odometry)
+      pkg: imu_filter_madgwick
+      exec: imu_filter_madgwick_node
+      name: imu_filter
+      namespace: rtabmap
+      param:
+        - {name: use_mag, value: false}
+        - {name: use_sim_time, value: $(var use_sim_time)}
+        - {name: publish_tf, value: false}
+        - {name: world_frame, value: enu}
+      remap:
+        - {from: imu/data_raw, to: $(var camera_ns)/imu}
+        - {from: imu/data, to: /rtabmap/imu}
+
+  # 2D semantic segmentation (TensorRT); publishes <camera_ns>/semantic/image_raw
+  - group:
+      if: $(var segmentation)
+      children:
+      - push_ros_namespace: {namespace: $(var camera_ns)}
+      - include:
+          file: $(find-pkg-share semantic_inference_ros)/launch/closed_set.launch.yaml
+          arg:
+            - {name: labelspace_name, value: $(var labelspace)}
+            - {name: max_image_queue_size, value: '0'}
+            - {name: reliable_input, value: 'true'}
+            - {name: input_queue_size, value: '200'}
+            - {name: label_queue_size, value: '200'}
+            - {name: fp16, value: $(var seg_fp16)}
+            - {name: model_width, value: $(var seg_width)}
+            - {name: model_height, value: $(var seg_height)}
+            - {name: publish_color, value: $(var seg_debug_images)}
+            - {name: publish_overlay, value: $(var seg_debug_images)}
+
+  # hydra
+  - set_remap: {from: hydra/input/camera/rgb/image_raw, to: $(var rgb)}
+  - set_remap: {from: hydra/input/camera/depth_registered/image_rect, to: $(var depth)}
+  - set_remap: {from: hydra/input/camera/rgb/camera_info, to: $(var info)}
+  - set_remap: {from: hydra/input/camera/semantic/image_raw, to: $(var camera_ns)/semantic/image_raw}
+  - include:
+      if: $(var hydra)
+      file: $(find-pkg-share hydra_ros)/launch/hydra.launch.yaml
+      arg:
+        - {name: dataset, value: d435i}
+        - {name: labelspace, value: $(var labelspace)}
+        - {name: robot_frame, value: camera_link}
+        - {name: odom_frame, value: odom}
+        - {name: map_frame, value: map}
+        - {name: hydra_config_path, value: $(var hydra_config)}
+        - {name: input_config_path, value: $(var input_config)}
+        - {name: log_path, value: $(var log_path)}
+        - {name: start_visualizer, value: $(var start_visualizer)}
+        - {name: use_sim_time, value: $(var use_sim_time)}
+        - {name: extra_yaml, value: '{active_window: {observation_recorder: {enable: $(var recorder), output_path: $(var observation_path)}}}'}
+  - node:
+      pkg: tf2_ros
+      name: odom_to_map
+      exec: static_transform_publisher
+      args: --frame-id odom --child-frame-id map
+      param:
+        - {name: use_sim_time, value: $(var use_sim_time)}
