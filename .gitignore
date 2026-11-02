@@ -13,3 +13,6 @@ colcon_build.log
 # copy of the Hydra fork's doc/observation_recording.md
 /observation_recording.md
 __pycache__/
+
+# this worktree lives inside the main workspace src/; keep colcon out of it
+/COLCON_IGNORE
