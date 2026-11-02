@@ -3,7 +3,8 @@
 # observation recorder, plus a raw rosbag (sqlite3) of the camera for offline re-runs.
 # Run interactively inside the hydra-dev container:
 #   docker exec -it hydra-dev bash /root/hydra_ws/scripts/run_d435i_obs.sh [session_name]
-# Press Enter (or Ctrl-C) to stop. Env: FPS (default 15), VIS=1 starts the Hydra visualizer,
+# Press Enter (or Ctrl-C) to stop. Env: FPS (default 15), RES (color and depth size, default
+# 1280x720, the D435i depth maximum; 640x480 for the earlier sessions), VIS=1 starts the Hydra visualizer,
 # STOP_AFTER=<s> stops automatically (non-interactive runs).
 #
 # Stop order: camera first (no new frames), then wait until the recorder output stops growing
@@ -18,6 +19,10 @@ set -m
 # background job below takes stdin from /dev/null
 NAME="${1:-$(date +%Y%m%d_%H%M%S)}"
 FPS="${FPS:-15}"
+RES="${RES:-1280x720}"
+W="${RES%x*}"; H="${RES#*x}"
+# RTAB-Map odometry detects features on a decimated image so its cost stays at the 640-wide level
+ODOM_DECIMATION=1; [ "$W" -ge 1280 ] && ODOM_DECIMATION=2
 VIS="${VIS:-0}"
 STOP_AFTER="${STOP_AFTER:-}"
 WS=/root/hydra_ws
@@ -44,14 +49,14 @@ cleanup() { for p in "${PIDS[@]}"; do kill -INT "$p" 2>/dev/null || true; done; 
 trap cleanup EXIT
 
 ros2 launch realsense2_camera rs_launch.py \
-  rgb_camera.color_profile:=640,480,$FPS depth_module.depth_profile:=640,480,$FPS \
+  rgb_camera.color_profile:=$W,$H,$FPS depth_module.depth_profile:=$W,$H,$FPS \
   align_depth.enable:=true enable_sync:=true \
   enable_gyro:=true enable_accel:=true unite_imu_method:=2 \
   < /dev/null > "$RUN_LOGS/camera.log" 2>&1 &
 CAM_PID=$!; PIDS+=($CAM_PID)
 
 LAUNCH_PID=
-echo "session $OUT"
+echo "session $OUT (${W}x${H} @ $FPS fps)"
 
 stop_pid() {  # stop_pid <pid> <timeout_s>: SIGINT, then SIGTERM if it does not exit in time
   kill -INT "$1" 2>/dev/null || return 0
@@ -90,6 +95,7 @@ sleep 3
 vis=false; [ "$VIS" = 1 ] && vis=true
 ros2 launch $WS/launch/d435i_obs.launch.yaml \
   log_path:=$LOG_PATH observation_path:=$OBS start_visualizer:=$vis \
+  odom_image_decimation:=$ODOM_DECIMATION \
   < /dev/null > "$RUN_LOGS/launch.log" 2>&1 &
 LAUNCH_PID=$!; PIDS+=($LAUNCH_PID)
 

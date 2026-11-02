@@ -91,7 +91,8 @@ docker exec -it hydra-dev bash /root/hydra_ws/scripts/run_d435i_obs.sh <session_
    and windows.
 3. Press Enter once to stop, then wait for `done:` (30-60 s while Hydra drains and saves).
 
-Environment options: `FPS` (default 15), `VIS=1` (Hydra visualizer), `STOP_AFTER=<s>` (stop
+Environment options: `FPS` (default 15), `RES` (color and depth size, default `1280x720`;
+sessions up to office_walk6 used `640x480`), `VIS=1` (Hydra visualizer), `STOP_AFTER=<s>` (stop
 automatically).
 
 Output in `/root/data/d435i/<session>/` (host: `~/hydra_data/d435i/<session>/`):

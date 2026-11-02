@@ -12,6 +12,8 @@ launch:
   # live RTAB-Map run) and use_sim_time:=true (bag played with --clock)
   - arg: {name: odometry, default: 'true'}
   - arg: {name: use_sim_time, default: 'false'}
+  # RTAB-Map odometry image decimation: 2 at 1280x720 keeps feature detection at 640x360
+  - arg: {name: odom_image_decimation, default: '1'}
   - let: {name: rgb, value: $(var camera_ns)/color/image_raw}
   - let: {name: depth, value: $(var camera_ns)/aligned_depth_to_color/image_raw}
   - let: {name: info, value: $(var camera_ns)/color/camera_info}
@@ -47,6 +49,7 @@ launch:
         # left ~24% of frames without odometry at 15 Hz
         - {name: Vis/MaxFeatures, value: '600'}
         - {name: OdomF2M/MaxSize, value: '1200'}
+        - {name: Odom/ImageDecimation, value: "'$(var odom_image_decimation)'"}  # quoted: rtabmap params are strings
       remap:
         - {from: rgb/image, to: $(var rgb)}
         - {from: depth/image, to: $(var depth)}
