@@ -201,6 +201,30 @@ class CameraPanel(QtWidgets.QWidget):
                           if n else "No observations/ folder next to this scene graph: no RGB / depth to show.")
         self.node_btn.setEnabled(False)
 
+    def update_observations(self, obs: model.Observations | None):
+        """Live mode: take a newer copy of the same session's frames, keeping the current frame."""
+        if self.obs is None or obs is None or not obs.ordered:
+            fid = self.frame.frame_id if self.frame is not None else None
+            self.set_observations(obs)
+            if fid is not None:
+                self.show_frame(fid)
+            return
+        self.obs = obs
+        self._t0 = obs.frames[obs.ordered[0]].timestamp_ns
+        self.slider.blockSignals(True)
+        self.slider.setRange(0, len(obs.ordered) - 1)
+        for w in (self.slider, self.prev, self.next, self.play):
+            w.setEnabled(True)
+        if self.frame is not None and self.frame.frame_id in obs.frames:
+            self.frame = obs.frames[self.frame.frame_id]
+            idx = obs.ordered.index(self.frame.frame_id)
+            self.slider.setValue(idx)
+            self.pos_label.setText(f"{idx + 1} / {len(obs.ordered)}   "
+                                   f"t = {(self.frame.timestamp_ns - self._t0) / 1e9:.2f} s")
+        else:
+            self.pos_label.setText(f"{len(obs.ordered)} frames")
+        self.slider.blockSignals(False)
+
     def show_frame(self, frame_id: int):
         if self.obs is None or frame_id not in self.obs.frames:
             return

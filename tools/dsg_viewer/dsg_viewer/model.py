@@ -155,6 +155,30 @@ def _load_mesh(m: dict) -> Mesh | None:
     return Mesh(points, faces, colors, labels)
 
 
+def _load_mesh_npz(path: pathlib.Path) -> Mesh | None:
+    try:
+        with np.load(path) as z:
+            if len(z["points"]) == 0:
+                return None
+            colors = z["colors"] if "colors" in z and len(z["colors"]) else None
+            labels = z["labels"] if "labels" in z and len(z["labels"]) else None
+            return Mesh(z["points"].astype(np.float32), z["faces"].astype(np.int64).reshape(-1, 3),
+                        colors.astype(np.uint8) if colors is not None else None,
+                        labels.astype(np.int64) if labels is not None else None)
+    except (OSError, KeyError, ValueError):
+        return None
+
+
+LIVE_DSG = "hydra/live/dsg.json"  # written by realtime/live_dsg_dump.py during a session
+
+
+def live_path(path: str | pathlib.Path) -> pathlib.Path:
+    """The live scene graph file of a session folder (or the given file)."""
+    path = pathlib.Path(path).expanduser().resolve()
+    # a session folder (possibly not created yet: the viewer may start before the session)
+    return path if path.suffix == ".json" else path / LIVE_DSG
+
+
 def find_session_root(dsg_path: pathlib.Path) -> pathlib.Path | None:
     """Session folder holding observations/ (dsg is usually <session>/hydra/backend/dsg.json)."""
     for p in [dsg_path.parent, *dsg_path.parents]:
@@ -257,8 +281,12 @@ def load(path: str | pathlib.Path) -> SceneGraph:
 
     g = SceneGraph(path=path, nodes=nodes, edges=edges, neighbors=neighbors)
     g.mesh = _load_mesh(data.get("mesh"))
+    npz = path.with_name("mesh.npz")  # live_dsg_dump.py writes the mesh as arrays
     if g.mesh is not None:
         g.mesh_path = path
+    elif npz.exists():
+        g.mesh = _load_mesh_npz(npz)
+        g.mesh_path = npz if g.mesh is not None else None
     else:
         sibling = path.with_name("dsg_with_mesh.json")
         if sibling.exists() and sibling != path:

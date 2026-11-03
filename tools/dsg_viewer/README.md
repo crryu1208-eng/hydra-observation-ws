@@ -31,6 +31,24 @@ tools/dsg_viewer/run.sh ~/hydra_data/d435i/office_walk3                  # sessi
 tools/dsg_viewer/run.sh ~/hydra_data/d435i/office_walk3/hydra/backend/dsg.json
 ```
 
+### Live mode (realtime sessions)
+
+While `realtime/run_realtime.sh` is recording (`LIVE=1`, the default), Hydra's loop-closure
+corrected scene graph and mesh are written to `<session>/hydra/live/` every 2 s by
+`realtime/live_dsg_dump.py`. `realtime/run_realtime_live.sh <session>` (on the host) starts the
+session and this viewer together, without network. To follow a session started otherwise:
+
+```bash
+tools/dsg_viewer/run.sh --live ~/hydra_data/realtime/office_rt1   # or File ▸ Open live session…
+```
+
+The view reloads whenever the files change and keeps the camera, the selection, hidden layers
+and the frame shown. "Follow camera" (toolbar) shows the newest recorded RGB / depth frame and
+its camera pose. During the session frame poses are the recorder's (odometry) ones; the
+loop-closure corrected frame poses exist only after the session ends. Opening a file ends live
+mode. The container needs the spark_dsg python bindings once:
+`docker exec hydra-dev bash /root/hydra_ws/src/hydra-realtime/realtime/install_live_viewer_deps.sh`.
+
 The first run creates a Python 3.12 environment in `.venv/` with [uv](https://docs.astral.sh/uv/),
 which installs PySide6, VTK and PyVista (about 1.2 GB). You can also drag a file onto the window.
 

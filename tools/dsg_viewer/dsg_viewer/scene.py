@@ -246,14 +246,23 @@ class SceneView:
     def _build_boxes(self):
         if not self.opt.boxes or "Objects" in self.opt.hidden_groups:
             return
+        # one actor for all boxes (colored per vertex): an actor per object made each live
+        # reload re-render the scene once per object
+        boxes, colors = [], []
         for n in self.g.groups().get("Objects", []):
             bb = n.attrs.get("bounding_box") or {}
             if bb.get("type") in (None, "INVALID") or "dimensions" not in bb:
                 continue
             center = np.asarray(bb.get("world_P_center", n.position), float)
-            a = self.p.add_mesh(_box_edges(center, bb["dimensions"]), color=label_color(n.label), line_width=2,
-                                pickable=False, reset_camera=False)
-            self._add("boxes", a)
+            boxes.append(_box_edges(center, bb["dimensions"]))
+            colors.append(np.tile(np.asarray(label_color(n.label)) * 255, (8, 1)))
+        if not boxes:
+            return
+        merged = boxes[0].merge(boxes[1:], merge_points=False) if len(boxes) > 1 else boxes[0]
+        merged.point_data["rgb"] = np.vstack(colors).astype(np.uint8)
+        a = self.p.add_mesh(merged, scalars="rgb", rgb=True, line_width=2, pickable=False,
+                            show_scalar_bar=False, reset_camera=False)
+        self._add("boxes", a)
 
     def _build_selection(self):
         self._drop("selection")

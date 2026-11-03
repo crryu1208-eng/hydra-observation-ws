@@ -8,7 +8,9 @@
 # Output: /root/data/realtime/<session>/{bag,observations,hydra,rtabmap,logs}
 # Press Enter (or Ctrl-C) to stop. Env: FPS (default 15), RES (color and depth size, default
 # 1280x720, the D435i depth maximum; 640x480 for the earlier sessions), VIS=1 starts the Hydra visualizer,
-# STOP_AFTER=<s> stops automatically (non-interactive runs).
+# STOP_AFTER=<s> stops automatically (non-interactive runs), LIVE=0 turns off the live scene graph
+# files for the DSG viewer (<session>/hydra/live; on the host:
+#   tools/dsg_viewer/run.sh --live ~/hydra_data/realtime/<session>).
 #
 # Stop order: camera first (no new frames), then wait until the recorder output stops growing
 # (Hydra's stop() does not drain its input queues), then /hydra/shutdown, then map frames to
@@ -27,6 +29,7 @@ W="${RES%x*}"; H="${RES#*x}"
 # RTAB-Map odometry detects features on a decimated image so its cost stays at the 640-wide level
 ODOM_DECIMATION=1; [ "$W" -ge 1280 ] && ODOM_DECIMATION=2
 VIS="${VIS:-0}"
+LIVE="${LIVE:-1}"
 STOP_AFTER="${STOP_AFTER:-}"
 WS=/root/hydra_ws
 RT="$(cd "$(dirname "$0")" && pwd)"
@@ -97,12 +100,18 @@ BAG_PID=$!; PIDS+=($BAG_PID)
 # let auto exposure settle so odometry does not initialize on a bad first frame
 sleep 3
 vis=false; [ "$VIS" = 1 ] && vis=true
+live=false; [ "$LIVE" = 1 ] && live=true
+if $live && ! python3 -c "import spark_dsg" 2>/dev/null; then
+  echo "LIVE=1 needs the spark_dsg python bindings: bash $RT/install_live_viewer_deps.sh (or LIVE=0)"
+  exit 1
+fi
 mkdir -p "$OUT/rtabmap"
 ros2 launch $RT/rt.launch.yaml \
   log_path:=$LOG_PATH observation_path:=$OBS start_visualizer:=$vis \
   odom_image_decimation:=$ODOM_DECIMATION \
   seg_fp16:=true seg_debug_images:=false hydra_config:=$RT/hydra_rt.yaml \
   slam:=true slam_db:=$OUT/rtabmap/rtabmap.db bridge_log:=$RUN_LOGS/bridge.jsonl \
+  live_dsg:=$live live_dsg_dir:=$LOG_PATH/live \
   < /dev/null > "$RUN_LOGS/launch.log" 2>&1 &
 LAUNCH_PID=$!; PIDS+=($LAUNCH_PID)
 
@@ -115,6 +124,7 @@ python3 $WS/src/hydra-realtime/scripts/d435i_monitor.py --watch "$OBS/frames_raw
 MON_PID=$!; PIDS+=($MON_PID)
 echo
 echo "=== RECORDING. Move the camera slowly; avoid blank walls and fast turns. ==="
+$live && echo "=== Live map on the host: tools/dsg_viewer/run.sh --live ~/hydra_data/realtime/$NAME ==="
 echo "=== Press Enter (or Ctrl-C) to stop. ==="
 trap 'echo' INT
 if [ -n "$STOP_AFTER" ]; then sleep "$STOP_AFTER" || true; else read -r || true; fi

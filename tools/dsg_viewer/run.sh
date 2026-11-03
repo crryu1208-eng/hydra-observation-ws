@@ -9,4 +9,7 @@ args=()
 for a in "$@"; do  # make relative paths absolute before uv changes directory
   if [ -e "$OLDPWD/$a" ] && [[ "$a" != /* ]]; then args+=("$OLDPWD/$a"); else args+=("$a"); fi
 done
-exec "$UV" run --quiet dsg-viewer "${args[@]}"
+# use the local uv cache when it has everything: a handheld realtime session may run without
+# network (DNS); only fall back to downloading when the cache is missing packages
+if "$UV" sync --offline --quiet 2>/dev/null; then offline=--offline; else offline=; fi
+exec "$UV" run $offline --quiet dsg-viewer "${args[@]}"

@@ -27,6 +27,9 @@ launch:
   - arg: {name: bridge_log, default: none}
   # odometry variance of the edge across a tracking reset (0: use Hydra's odometry variance)
   - arg: {name: bridge_reset_variance, default: '10000.0'}
+  # live scene graph files for tools/dsg_viewer --live (realtime/live_dsg_dump.py)
+  - arg: {name: live_dsg, default: 'false'}
+  - arg: {name: live_dsg_dir, default: /root/data/realtime/default/hydra/live}
   - arg: {name: recorder, default: 'true'}
   - arg: {name: segmentation, default: 'true'}
   # segmentation speed: FP16 engine, inference resolution, debug image outputs
@@ -115,6 +118,13 @@ launch:
       cmd: >-
         python3 $(dirname)/rtabmap_hydra_bridge.py --ros-args
         -p use_sim_time:=$(var use_sim_time) -p log_path:=$(var bridge_log) -p reset_variance:=$(var bridge_reset_variance)
+      output: screen
+
+  - executable:
+      if: $(var live_dsg)
+      cmd: >-
+        python3 $(dirname)/live_dsg_dump.py --ros-args
+        -p use_sim_time:=$(var use_sim_time) -p out_dir:=$(var live_dsg_dir)
       output: screen
 
   # orientation for the raw D435i IMU (gyro + accel, no magnetometer)

@@ -4,6 +4,7 @@ trajectory and the RGB frames the observation recorder attached to each agent no
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import json
 import os
 import pathlib
@@ -301,6 +302,7 @@ class MainWindow(QtWidgets.QMainWindow):
         a.setShortcut(QtGui.QKeySequence.Open)
         m.addAction("Open &session folder…", self.open_dir_dialog)
         m.addAction("&Reload", lambda: self.graph and self.open_path(self.graph.path)).setShortcut("F5")
+        m.addAction("Open &live session…", self.open_live_dialog)
         m.addAction("Save &screenshot…", self.save_screenshot)
         m.addSeparator()
         m.addAction("&Quit", self.close).setShortcut(QtGui.QKeySequence.Quit)
@@ -374,6 +376,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self.open_path(path)
 
     def open_path(self, path):
+        if hasattr(self, "_live_timer"):  # opening a file ends live mode
+            self._live_timer.stop()
+            self.live_tb.hide()
         QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
         try:
             g = model.load(path)
@@ -395,6 +400,101 @@ class MainWindow(QtWidgets.QMainWindow):
         self.setWindowTitle(f"DSG Viewer — {g.path}")
         self.statusBar().showMessage(f"{counts}; {len(g.edges)} edges{mesh}{obs}")
 
+    # ---- live mode --------------------------------------------------------------------------
+    def open_live_dialog(self):
+        start = str(pathlib.Path("~/hydra_data/realtime").expanduser())
+        path = QtWidgets.QFileDialog.getExistingDirectory(self, "Open live session folder", start)
+        if path:
+            self.start_live(path)
+
+    def start_live(self, path):
+        """Follow a running session: reload <session>/hydra/live/dsg.json whenever
+        realtime/live_dsg_dump.py replaces it, keeping the view, selection and frame."""
+        self.live_path = model.live_path(path)
+        self._live_mtime = None
+        self._live_future = None
+        if not hasattr(self, "_live_pool"):
+            self._live_pool = concurrent.futures.ThreadPoolExecutor(1)  # parse off the UI thread
+            self._live_timer = QtCore.QTimer(self)
+            self._live_timer.setInterval(500)
+            self._live_timer.timeout.connect(self._live_tick)
+            self.follow = QtWidgets.QCheckBox("Follow camera")
+            self.follow.setChecked(True)
+            self.follow.setToolTip("Live: show the newest recorded frame (RGB / depth and its camera pose)")
+            self.live_tb = self.addToolBar("Live")
+            self.live_tb.setObjectName("live")
+            self.live_label = QtWidgets.QLabel()
+            self.live_tb.addWidget(self.live_label)
+            self.live_tb.addWidget(self.follow)
+            self.follow.toggled.connect(lambda on: on and self._follow_latest())
+        self.live_tb.show()
+        self._live_timer.start()
+        self.live_label.setText(" ● LIVE waiting ")
+        self.statusBar().showMessage(f"Live: waiting for {self.live_path}")
+
+    def _live_tick(self):
+        if self._live_future is not None:
+            if not self._live_future.done():
+                return
+            fut, self._live_future = self._live_future, None
+            try:
+                g = fut.result()
+            except Exception as e:  # a file replaced while reading: try again on the next change
+                self.statusBar().showMessage(f"Live: {e}")
+                return
+            self._apply_live(g)
+            return
+        try:
+            mtime = self.live_path.stat().st_mtime_ns
+        except FileNotFoundError:
+            return
+        if mtime != self._live_mtime:
+            self._live_mtime = mtime
+            self._live_future = self._live_pool.submit(model.load, self.live_path)
+
+    def _apply_live(self, g: model.SceneGraph):
+        first = self.graph is None or self.graph.path != g.path
+        cam = self.plotter.camera_position
+        selected = self.scene.selected
+        frame = self.scene.current_frame
+        expanded = {self.tree.topLevelItem(i).data(0, GROUP_ROLE) for i in range(self.tree.topLevelItemCount())
+                    if self.tree.topLevelItem(i).isExpanded()}
+        self.graph = g
+        self.scene.g = g
+        self.scene.selected = selected if selected in g.nodes else None
+        self.scene.current_frame = frame
+        self.scene.rebuild()
+        if first:
+            self.plotter.reset_camera()
+        else:
+            self.plotter.camera_position = cam
+        self.plotter.render()
+        self._fill_tree(None if first else expanded)
+        self._filter_tree(self.search.text())
+        if self.scene.selected is not None:
+            self.inspector.show_node(g, g.nodes[self.scene.selected])
+            it = self._tree_items.get(self.scene.selected)
+            if it is not None:
+                self.tree.blockSignals(True)
+                self.tree.setCurrentItem(it)
+                self.tree.blockSignals(False)
+        elif first:
+            self.inspector.show_node(g, None)
+        self.camera.update_observations(g.observations)
+        if self.follow.isChecked():
+            self._follow_latest()
+        counts = ", ".join(f"{len(v)} {k.lower()}" for k, v in g.groups().items())
+        mesh = f", mesh {len(g.mesh.points):,} vertices" if g.mesh is not None else ""
+        nf = len(g.observations.frames) if g.observations else 0
+        self.setWindowTitle(f"DSG Viewer — LIVE {g.path}")
+        self.live_label.setText(f" ● LIVE {QtCore.QTime.currentTime().toString('HH:mm:ss')} ")
+        self.statusBar().showMessage(f"Live: {counts}{mesh}, {nf:,} recorded frames")
+
+    def _follow_latest(self):
+        obs = self.graph.observations if self.graph else None
+        if obs and obs.ordered:
+            self.show_frame(obs.ordered[-1])
+
     def dragEnterEvent(self, e):
         if e.mimeData().hasUrls():
             e.acceptProposedAction()
@@ -410,7 +510,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.plotter.screenshot(path)
 
     # ---- tree ---------------------------------------------------------------------------------
-    def _fill_tree(self):
+    def _fill_tree(self, expanded: set[str] | None = None):
         self.tree.blockSignals(True)
         self.tree.clear()
         self._tree_items.clear()
@@ -418,7 +518,8 @@ class MainWindow(QtWidgets.QMainWindow):
             top = QtWidgets.QTreeWidgetItem([group, str(len(nodes))])
             top.setData(0, GROUP_ROLE, group)
             top.setFlags(top.flags() | QtCore.Qt.ItemIsUserCheckable)
-            top.setCheckState(0, QtCore.Qt.Checked)
+            top.setCheckState(0, QtCore.Qt.Unchecked if group in self.scene.opt.hidden_groups
+                              else QtCore.Qt.Checked)
             top.setIcon(0, swatch(GROUP_STYLE.get(group, DEFAULT_STYLE)[0]))
             f = top.font(0)
             f.setBold(True)
@@ -435,7 +536,8 @@ class MainWindow(QtWidgets.QMainWindow):
                     it.setToolTip(1, f"{k} recorded frames")
                 top.addChild(it)
                 self._tree_items[n.id] = it
-            top.setExpanded(group in ("Objects", "Rooms", "Buildings"))
+            top.setExpanded(group in expanded if expanded is not None
+                            else group in ("Objects", "Rooms", "Buildings"))
         self.tree.blockSignals(False)
 
     def _filter_tree(self, text):
@@ -552,6 +654,8 @@ class MainWindow(QtWidgets.QMainWindow):
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Navigate a Hydra 3D scene graph (dsg.json) in 3D.")
     parser.add_argument("path", nargs="?", help="dsg.json, dsg_with_mesh.json or a session folder")
+    parser.add_argument("--live", action="store_true",
+                        help="follow a running session (path = session folder or its hydra/live/dsg.json)")
     parser.add_argument("--screenshot", help=argparse.SUPPRESS)  # smoke test: render, save, quit
     parser.add_argument("--select", help=argparse.SUPPRESS)  # smoke test: select a node symbol
     parser.add_argument("--frame", type=int, help=argparse.SUPPRESS)  # smoke test: show a frame id
@@ -560,7 +664,9 @@ def main(argv=None):
     app.setApplicationName("DSG Viewer")
     w = MainWindow()
     w.show()
-    if args.path:
+    if args.path and args.live:
+        QtCore.QTimer.singleShot(0, lambda: w.start_live(args.path))
+    elif args.path:
         QtCore.QTimer.singleShot(0, lambda: w.open_path(args.path))
     if args.screenshot:
         def shoot():

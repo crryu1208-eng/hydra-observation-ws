@@ -86,6 +86,9 @@ frontend:
       ratio: 2
   use_frontiers: false
 backend:
+  # /hydra/backend/dsg (only serialized while subscribed, e.g. by live_dsg_dump.py or the
+  # visualizer): at most once per second, the mesh-included graph costs backend time
+  min_dsg_separation_s: 1.0
   add_places_to_deformation_graph: false  # `false` means that place meshes are not used in PGO
   optimize_on_lc: true
   max_external_loop_closure_time_difference: 1.0
