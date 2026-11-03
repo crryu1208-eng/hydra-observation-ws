@@ -9,6 +9,7 @@
 #      ODOM=1 runs RTAB-Map RGB-D odometry live on the bag images (the bag's /tf, which has
 #      the recorded odometry, is not played; IMU is),
 #      SLAM=1 adds live RTAB-Map SLAM (loop closures) on that odometry,
+#      REC=1 also records the raw bag like run_realtime.sh (its CPU and disk load),
 #      LAUNCH_ARGS (extra ros2 launch args), SAVE_LABELS=1 (keep every 10th label image for
 #      accuracy comparisons, see compare_labels.py)
 # Output: /root/data/realtime/profile/<tag>/{summary.json,logs,observations,hydra}
@@ -21,7 +22,7 @@ RATE="${RATE:-1.0}"; START="${START:-5}"; DUR="${DUR:-40}"
 HYDRA="${HYDRA:-1}"; RECORDER="${RECORDER:-1}"; SEG="${SEG:-1}"; ODOM="${ODOM:-0}"; SLAM="${SLAM:-0}"
 RT="$(cd "$(dirname "$0")" && pwd)"
 WS=/root/hydra_ws
-SRC=/root/data/d435i/$SESSION
+SRC="${SRC:-/root/data/d435i/$SESSION}"  # or a realtime session: SRC=/root/data/realtime/<name>
 OUT=/root/data/realtime/profile/$TAG
 CAM=/camera/camera
 [ -d "$SRC/bag" ] || { echo "no bag in $SRC"; exit 1; }
@@ -69,9 +70,10 @@ QOS=$LOGS/bag_qos_overrides.yaml
 
 [ "$SEG" = 1 ] && wait_log "IExecutionContext creation" 600
 if [ "$HYDRA" = 1 ]; then
+  # 8 s: a live session bag may get the camera's /tf_static a few seconds after its first message
   for i in $(seq 1 30); do
     ros2 bag play "$SRC/bag" --topics $CAM/color/camera_info /tf_static \
-      --playback-duration 1 --disable-keyboard-controls --qos-profile-overrides-path $QOS \
+      --playback-duration 8 --disable-keyboard-controls --qos-profile-overrides-path $QOS \
       < /dev/null > "$LOGS/preplay.log" 2>&1
     grep -q "\[hydra\]: Running..." "$LOGS/launch.log" && break
   done
@@ -88,6 +90,16 @@ nvidia-smi --query-gpu=utilization.gpu,power.draw,clocks.sm --format=csv,noheade
 GPU_PID=$!
 top -b -d 1 -w 200 > "$LOGS/top.log" 2>/dev/null &
 TOP_PID=$!
+REC_PID=
+if [ "${REC:-0}" = 1 ]; then  # same topics as run_realtime.sh
+  ros2 bag record -s sqlite3 --disable-keyboard-controls -o "$OUT/bag_rec" \
+    $CAM/color/image_raw $CAM/color/camera_info \
+    $CAM/aligned_depth_to_color/image_raw $CAM/aligned_depth_to_color/camera_info \
+    $CAM/imu /tf /tf_static /rtabmap/odom /rtabmap/odom_info \
+    < /dev/null > "$LOGS/bag_record.log" 2>&1 &
+  REC_PID=$!
+  sleep 2
+fi
 echo "playing $SESSION [$START, +$DUR] s at $RATE x -> $OUT"
 ros2 bag play "$SRC/bag" --clock -r "$RATE" --disable-keyboard-controls \
   --start-offset "$START" --playback-duration "$DUR" \
@@ -98,6 +110,7 @@ ros2 bag play "$SRC/bag" --clock -r "$RATE" --disable-keyboard-controls \
   < /dev/null > "$LOGS/bag_play.log" 2>&1
 sleep 5   # let the tail of the pipeline arrive
 kill $GPU_PID $TOP_PID 2>/dev/null || true
+[ -n "$REC_PID" ] && { kill -INT $REC_PID; wait $REC_PID || true; }
 kill -INT $MON_PID; wait $MON_PID || true
 if [ "$HYDRA" = 1 ]; then
   timeout 30 ros2 service call /hydra/shutdown std_srvs/srv/Empty > /dev/null || true
