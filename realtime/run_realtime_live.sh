@@ -4,7 +4,7 @@
 # the newest RGB / depth frame. Works without network: the container keeps DDS on localhost and
 # the viewer uses its local uv environment / cache.
 #   realtime/run_realtime_live.sh [session_name]
-# Env passed to the container: FPS, RES, VIS, STOP_AFTER. The viewer stays open after the
+# Env passed to the container: FPS, RES, VIS, STOP_AFTER, CAM_NICE. The viewer stays open after the
 # session ends (File > Open session folder shows the final, loop-closure corrected result).
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -29,7 +29,7 @@ fi
 echo "live viewer started (log $VIEWER_LOG)"
 
 env_args=()
-for v in FPS RES VIS STOP_AFTER; do
+for v in FPS RES VIS STOP_AFTER CAM_NICE; do
   [ -n "${!v:-}" ] && env_args+=(-e "$v=${!v}")
 done
 tty=(-i); [ -t 0 ] && tty=(-it)

@@ -1,9 +1,16 @@
 # Realtime variant of config/d435i_obs.yaml (15 fps target at 1280x720):
 # - full_update_separation_s: TSDF integration and observation recording stay at every frame, the
-#   mesh / frontend (objects, places, mesh compression) update at most every 0.2 s; their cost grows
-#   with the map (60 s office walk: frontend 8 -> 66 ms per update), so at 15 Hz they fell behind
+#   mesh / frontend (objects, places, mesh compression) and the backend (after the first loop
+#   closure: full optimization + mesh deformation on every update) run at most every 0.5 s; their
+#   cost grows with the map (60 s office walk: frontend 8 -> 66 ms per update), so at 15 Hz they
+#   fell behind. 0.2 -> 0.5 s cut Hydra's late-session CPU by ~0.7 cores (office_rt4 replay)
 # - depth saved as 16-bit PNG in millimeters (the D435i's native unit, lossless) instead of
 #   float32 TIFF: 3.5 MB -> 0.4 MB per frame
+# - PNGs written without zlib compression (png_compression 0): with level 1 the 4 writer threads
+#   used ~1.6 cores; level 0 frees ~1 core at 4.6 instead of 1.5 MB per frame (~4 GB per minute).
+#   Live sessions lost frames because the camera driver's CPU depth alignment was starved
+#   (office_rt3/rt4: aligned depth 14 -> 11.4 Hz late in the walk); 0.5 s + level 0 together took
+#   the late-session load from 7.75 to 5.98 cores with the same trajectory accuracy
 # - 4 writer threads (PNG encoding is CPU bound: one thread managed only ~11 fps of 720p RGB +
 #   depth PNGs and blocked Hydra 40 s in a 60 s run) and a deeper queue for disk flushes
 # - loop closures come verified from RTAB-Map (rt.launch.yaml slam:=true, rtabmap_hydra_bridge.py):
@@ -19,7 +26,7 @@ map_window:
   type: spatial
   max_radius_m: 8.0
 active_window:
-  full_update_separation_s: 0.2
+  full_update_separation_s: 0.5
   observation_recorder:
     enable: true
     output_path: /root/data/hydra_observations/d435i
@@ -28,7 +35,7 @@ active_window:
     max_queue_bytes: 1073741824
     save_depth: true
     depth_format: png_u16_mm
-    png_compression: 1
+    png_compression: 0
     num_writer_threads: 4
   volumetric_map:
     voxels_per_side: 16

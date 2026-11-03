@@ -8,7 +8,7 @@
 # Output: /root/data/realtime/<session>/{bag,observations,hydra,rtabmap,logs}
 # Press Enter (or Ctrl-C) to stop. Env: FPS (default 15), RES (color and depth size, default
 # 1280x720, the D435i depth maximum; 640x480 for the earlier sessions), VIS=1 starts the Hydra visualizer,
-# STOP_AFTER=<s> stops automatically (non-interactive runs), LIVE=0 turns off the live scene graph
+# CAM_NICE (camera driver nice value, default -10), STOP_AFTER=<s> stops automatically (non-interactive runs), LIVE=0 turns off the live scene graph
 # files for the DSG viewer (<session>/hydra/live; on the host:
 #   tools/dsg_viewer/run.sh --live ~/hydra_data/realtime/<session>).
 #
@@ -30,6 +30,11 @@ W="${RES%x*}"; H="${RES#*x}"
 ODOM_DECIMATION=1; [ "$W" -ge 1280 ] && ODOM_DECIMATION=2
 VIS="${VIS:-0}"
 LIVE="${LIVE:-1}"
+# camera driver priority: realsense2_camera aligns depth to color on the CPU; on office_rt3 its
+# aligned depth fell from 14 to 11.6 Hz once Hydra's load grew (+2 cores after loop closures),
+# and every frame without aligned depth is a frame not recorded. Negative = higher priority
+# (the container runs privileged); CAM_NICE=0 restores the default.
+CAM_NICE="${CAM_NICE:--10}"
 STOP_AFTER="${STOP_AFTER:-}"
 WS=/root/hydra_ws
 RT="$(cd "$(dirname "$0")" && pwd)"
@@ -55,7 +60,7 @@ PIDS=()
 cleanup() { for p in "${PIDS[@]}"; do kill -INT "$p" 2>/dev/null || true; done; }
 trap cleanup EXIT
 
-ros2 launch realsense2_camera rs_launch.py \
+nice -n "$CAM_NICE" ros2 launch realsense2_camera rs_launch.py \
   rgb_camera.color_profile:=$W,$H,$FPS depth_module.depth_profile:=$W,$H,$FPS \
   align_depth.enable:=true enable_sync:=true \
   enable_gyro:=true enable_accel:=true unite_imu_method:=2 \
