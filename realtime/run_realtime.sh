@@ -8,7 +8,7 @@
 # Output: /root/data/realtime/<session>/{bag,observations,hydra,rtabmap,logs}
 # Press Enter (or Ctrl-C) to stop. Env: FPS (default 15), RES (color and depth size, default
 # 1280x720, the D435i depth maximum; 640x480 for the earlier sessions), VIS=1 starts the Hydra visualizer,
-# CAM_NICE (camera driver nice value, default -10), STOP_AFTER=<s> stops automatically (non-interactive runs), LIVE=0 turns off the live scene graph
+# CAM_NICE (camera driver nice value, default -10), CAM_CPUS / PIPE_CPUS (CPU pinning, PIN=0 off), STOP_AFTER=<s> stops automatically (non-interactive runs), LIVE=0 turns off the live scene graph
 # files for the DSG viewer (<session>/hydra/live; on the host:
 #   tools/dsg_viewer/run.sh --live ~/hydra_data/realtime/<session>).
 #
@@ -36,6 +36,14 @@ LIVE="${LIVE:-1}"
 # (the container runs privileged); CAM_NICE=0 restores the default.
 CAM_NICE="${CAM_NICE:--10}"
 STOP_AFTER="${STOP_AFTER:-}"
+# CPU pinning: the camera driver gets its own P-cores, everything else (Hydra, segmentation,
+# odometry, SLAM, bag, monitors) the rest. Under the mapping load the driver lost raw depth
+# frames (camera + office_rt5 replay load: 5-23% of color frames without aligned depth, raw depth
+# down to 11 Hz); pinned 1.0-1.8%, with the same pipeline throughput. i9-12900H: CPUs 0-11 are
+# P-cores (hyperthread pairs 0/1, 2/3, ...), 12-19 E-cores.
+PIN="${PIN:-1}"
+CAM_CPUS="${CAM_CPUS:-0-3}"
+PIPE_CPUS="${PIPE_CPUS:-4-19}"
 WS=/root/hydra_ws
 RT="$(cd "$(dirname "$0")" && pwd)"
 OUT=/root/data/realtime/$NAME
@@ -47,6 +55,11 @@ IDLE_S=20
 CAM=/camera/camera
 
 if [ -e "$OUT" ]; then echo "$OUT already exists"; exit 1; fi
+if [ "$PIN" = 1 ]; then
+  # this script and every process it starts inherit PIPE_CPUS; only the camera is moved to CAM_CPUS
+  taskset -cp "$PIPE_CPUS" $$ > /dev/null || { echo "cannot pin to CPUs $PIPE_CPUS (PIN=0 to skip)"; exit 1; }
+  echo "CPU pinning: camera driver on $CAM_CPUS, pipeline on $PIPE_CPUS"
+fi
 source /opt/ros/jazzy/setup.bash
 source $WS/install/setup.bash
 export SEMANTIC_INFERENCE_MODEL_DIR=$WS/.models
@@ -60,7 +73,8 @@ PIDS=()
 cleanup() { for p in "${PIDS[@]}"; do kill -INT "$p" 2>/dev/null || true; done; }
 trap cleanup EXIT
 
-nice -n "$CAM_NICE" ros2 launch realsense2_camera rs_launch.py \
+cam_pin=(); [ "$PIN" = 1 ] && cam_pin=(taskset -c "$CAM_CPUS")
+"${cam_pin[@]}" nice -n "$CAM_NICE" ros2 launch realsense2_camera rs_launch.py \
   rgb_camera.color_profile:=$W,$H,$FPS depth_module.depth_profile:=$W,$H,$FPS \
   align_depth.enable:=true enable_sync:=true \
   enable_gyro:=true enable_accel:=true unite_imu_method:=2 \

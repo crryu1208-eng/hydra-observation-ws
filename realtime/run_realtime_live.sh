@@ -4,7 +4,7 @@
 # the newest RGB / depth frame. Works without network: the container keeps DDS on localhost and
 # the viewer uses its local uv environment / cache.
 #   realtime/run_realtime_live.sh [session_name]
-# Env passed to the container: FPS, RES, VIS, STOP_AFTER, CAM_NICE. The viewer stays open after the
+# Env passed to the container: FPS, RES, VIS, STOP_AFTER, CAM_NICE, PIN, CAM_CPUS, PIPE_CPUS. The viewer stays open after the
 # session ends (File > Open session folder shows the final, loop-closure corrected result).
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -20,7 +20,9 @@ docker exec hydra-dev python3 -c "import spark_dsg" 2>/dev/null || {
 
 # the viewer waits until the session writes <session>/hydra/live/dsg.json
 VIEWER_LOG="$(mktemp -t dsg_viewer_live.XXXXXX.log)"
-"$HERE/../tools/dsg_viewer/run.sh" --live "$SESSION" > "$VIEWER_LOG" 2>&1 &
+# the viewer stays off the camera driver's CPUs too (run_realtime.sh pins the driver to CAM_CPUS)
+viewer_pin=(); [ "${PIN:-1}" = 1 ] && command -v taskset > /dev/null && viewer_pin=(taskset -c "${PIPE_CPUS:-4-19}")
+"${viewer_pin[@]}" "$HERE/../tools/dsg_viewer/run.sh" --live "$SESSION" > "$VIEWER_LOG" 2>&1 &
 VIEWER_PID=$!
 sleep 2
 if ! kill -0 $VIEWER_PID 2>/dev/null; then
@@ -29,7 +31,7 @@ fi
 echo "live viewer started (log $VIEWER_LOG)"
 
 env_args=()
-for v in FPS RES VIS STOP_AFTER CAM_NICE; do
+for v in FPS RES VIS STOP_AFTER CAM_NICE PIN CAM_CPUS PIPE_CPUS; do
   [ -n "${!v:-}" ] && env_args+=(-e "$v=${!v}")
 done
 tty=(-i); [ -t 0 ] && tty=(-it)
