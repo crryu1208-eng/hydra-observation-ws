@@ -49,10 +49,12 @@ for r in hydra:Hydra hydra_ros:Hydra-ROS semantic_inference:semantic_inference; 
   fi
 done
 
-# realtime branch (realtime/): speed changes on branch feature/realtime of the hydra and
-# semantic_inference forks; kimera_pgmo has no fork, its change is applied from a patch
+# realtime branch (realtime/): changes on branch feature/realtime of the hydra,
+# semantic_inference and kimera_pgmo forks
 RT_BRANCH=feature/realtime
-for name in hydra semantic_inference; do
+git -C src/kimera_pgmo remote get-url fork >/dev/null 2>&1 \
+  || git -C src/kimera_pgmo remote add fork "https://github.com/crryu1208-eng/Kimera-PGMO.git"
+for name in hydra semantic_inference kimera_pgmo; do
   git -C "src/$name" fetch --quiet fork "$RT_BRANCH"
   if git -C "src/$name" rev-parse --verify --quiet "$RT_BRANCH" >/dev/null; then
     git -C "src/$name" checkout --quiet "$RT_BRANCH"
@@ -61,13 +63,6 @@ for name in hydra semantic_inference; do
   fi
   echo "$name: $RT_BRANCH ($(git -C "src/$name" rev-parse --short HEAD))"
 done
-if ! git -C src/kimera_pgmo rev-parse --verify --quiet "$RT_BRANCH" >/dev/null; then
-  git -C src/kimera_pgmo checkout --quiet -b "$RT_BRANCH"
-  git -C src/kimera_pgmo -c user.name=setup -c user.email=setup@localhost \
-    am --quiet "$WS/realtime/patches/kimera_pgmo-edge-covariance.patch"
-fi
-git -C src/kimera_pgmo checkout --quiet "$RT_BRANCH"
-echo "kimera_pgmo: $RT_BRANCH ($(git -C src/kimera_pgmo rev-parse --short HEAD))"
 
 # same build options as the original PC (container has only system OpenCV)
 cat > colcon_defaults.yaml <<'EOF'
