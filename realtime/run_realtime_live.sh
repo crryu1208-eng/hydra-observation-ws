@@ -21,7 +21,7 @@ docker exec hydra-dev python3 -c "import spark_dsg" 2>/dev/null || {
 # the viewer waits until the session writes <session>/hydra/live/dsg.json
 VIEWER_LOG="$(mktemp -t dsg_viewer_live.XXXXXX.log)"
 # the viewer stays off the camera driver's CPUs too (run_realtime.sh pins the driver to CAM_CPUS)
-viewer_pin=(); [ "${PIN:-1}" = 1 ] && command -v taskset > /dev/null && viewer_pin=(taskset -c "${PIPE_CPUS:-4-19}")
+viewer_pin=(); [ "${PIN:-1}" = 1 ] && command -v taskset > /dev/null && viewer_pin=(taskset -c "${PIPE_CPUS:-6-19}")
 "${viewer_pin[@]}" "$HERE/../tools/dsg_viewer/run.sh" --live "$SESSION" > "$VIEWER_LOG" 2>&1 &
 VIEWER_PID=$!
 sleep 2

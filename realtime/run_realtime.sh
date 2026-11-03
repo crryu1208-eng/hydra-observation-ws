@@ -39,11 +39,12 @@ STOP_AFTER="${STOP_AFTER:-}"
 # CPU pinning: the camera driver gets its own P-cores, everything else (Hydra, segmentation,
 # odometry, SLAM, bag, monitors) the rest. Under the mapping load the driver lost raw depth
 # frames (camera + office_rt5 replay load: 5-23% of color frames without aligned depth, raw depth
-# down to 11 Hz); pinned 1.0-1.8%, with the same pipeline throughput. i9-12900H: CPUs 0-11 are
+# down to 11 Hz); camera on 0-3: 1.0-4.1%, on 0-5 (pipeline on 6-19): 0.2-2.7%, with the same
+# pipeline throughput (office_rt6 live walk on 0-3: 3.8%, office_rt5 unpinned 6.5%). i9-12900H: CPUs 0-11 are
 # P-cores (hyperthread pairs 0/1, 2/3, ...), 12-19 E-cores.
 PIN="${PIN:-1}"
-CAM_CPUS="${CAM_CPUS:-0-3}"
-PIPE_CPUS="${PIPE_CPUS:-4-19}"
+CAM_CPUS="${CAM_CPUS:-0-5}"
+PIPE_CPUS="${PIPE_CPUS:-6-19}"
 WS=/root/hydra_ws
 RT="$(cd "$(dirname "$0")" && pwd)"
 OUT=/root/data/realtime/$NAME
