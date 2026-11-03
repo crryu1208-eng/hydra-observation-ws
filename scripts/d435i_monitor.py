@@ -15,6 +15,7 @@ import time
 
 import rclpy
 from rclpy.executors import ExternalShutdownException
+from rclpy.serialization import deserialize_message
 from rtabmap_msgs.msg import OdomInfo
 from std_srvs.srv import Empty
 
@@ -30,6 +31,14 @@ def count_lines(path):
         return 0
 
 
+def spin_once(node):
+    """spin_once that survives a message rclpy cannot take (logged, skipped)."""
+    try:
+        rclpy.spin_once(node, timeout_sec=0.1)
+    except RuntimeError as e:
+        print(f"monitor: skipped a message ({e})", flush=True)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     group = parser.add_mutually_exclusive_group(required=True)
@@ -40,14 +49,25 @@ def main():
     rclpy.init()
     node = rclpy.create_node("d435i_monitor")
     infos = []  # (receive time, lost)
-    node.create_subscription(OdomInfo, "/rtabmap/odom_info", lambda m: infos.append((time.time(), m.lost)), 50)
+    # raw subscription, decoded here: rclpy's own message conversion occasionally raised
+    # "RuntimeError: Unable to convert call argument '0' to Python object" inside spin_once and
+    # killed the monitor (office_rt3); a message that fails to decode is now skipped
+    bad = [0]
+
+    def on_info(data):
+        try:
+            infos.append((time.time(), deserialize_message(data, OdomInfo).lost))
+        except Exception:  # noqa: BLE001
+            bad[0] += 1
+
+    node.create_subscription(OdomInfo, "/rtabmap/odom_info", on_info, 50, raw=True)
     reset = node.create_client(Empty, "/rtabmap/reset_odom")
 
     start = time.time()
     if args.wait_tracking is not None:
         ok_since = lost_since = None
         while time.time() - start < args.wait_tracking:
-            rclpy.spin_once(node, timeout_sec=0.1)
+            spin_once(node)
             if not infos:
                 continue
             now, lost = infos[-1]
@@ -69,7 +89,7 @@ def main():
 
     next_print = time.time() + 2.0
     while True:
-        rclpy.spin_once(node, timeout_sec=0.1)
+        spin_once(node)
         now = time.time()
         if now < next_print:
             continue
