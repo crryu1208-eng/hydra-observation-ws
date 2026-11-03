@@ -22,6 +22,11 @@ launch:
   - arg: {name: slam, default: 'false'}
   - arg: {name: slam_rate, default: '2'}
   - arg: {name: slam_db, default: /root/data/realtime/rtabmap.db}
+  # with slam, RTAB-Map keyframes become Hydra's agent pose graph and its loop closures are fed to
+  # Hydra's backend live (realtime/rtabmap_hydra_bridge.py); bridge_log records each closure
+  - arg: {name: bridge_log, default: none}
+  # odometry variance of the edge across a tracking reset (0: use Hydra's odometry variance)
+  - arg: {name: bridge_reset_variance, default: '10000.0'}
   - arg: {name: recorder, default: 'true'}
   - arg: {name: segmentation, default: 'true'}
   # segmentation speed: FP16 engine, inference resolution, debug image outputs
@@ -105,6 +110,13 @@ launch:
         - {from: rgb/camera_info, to: $(var info)}
         - {from: odom, to: /rtabmap/odom}
 
+  - executable:
+      if: $(var slam)
+      cmd: >-
+        python3 $(dirname)/rtabmap_hydra_bridge.py --ros-args
+        -p use_sim_time:=$(var use_sim_time) -p log_path:=$(var bridge_log) -p reset_variance:=$(var bridge_reset_variance)
+      output: screen
+
   # orientation for the raw D435i IMU (gyro + accel, no magnetometer)
   - node:
       if: $(var odometry)
@@ -159,7 +171,8 @@ launch:
         - {name: log_path, value: $(var log_path)}
         - {name: start_visualizer, value: $(var start_visualizer)}
         - {name: use_sim_time, value: $(var use_sim_time)}
-        - {name: extra_yaml, value: '{active_window: {observation_recorder: {enable: $(var recorder), output_path: $(var observation_path)}}}'}
+        # with slam the agent pose graph comes from the bridge instead of Hydra's PoseGraphFromOdom
+        - {name: extra_yaml, value: '{active_window: {observation_recorder: {enable: $(var recorder), output_path: $(var observation_path)}}$(if $(var slam) ", frontend: {pose_graph_tracker: {type: RosPoseGraphs}}")}'}
   - node:
       pkg: tf2_ros
       name: odom_to_map

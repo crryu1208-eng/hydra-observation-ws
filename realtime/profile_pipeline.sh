@@ -37,7 +37,7 @@ mkdir -p "$OUT/logs"
 LOGS=$OUT/logs
 b() { [ "$1" = 1 ] && echo true || echo false; }
 
-ros2 launch $RT/rt.launch.yaml odometry:=$(b $ODOM) slam:=$(b $SLAM) slam_db:=$OUT/rtabmap.db use_sim_time:=true odom_image_decimation:=2 \
+ros2 launch $RT/rt.launch.yaml odometry:=$(b $ODOM) slam:=$(b $SLAM) slam_db:=$OUT/rtabmap.db bridge_log:=$OUT/logs/bridge.jsonl use_sim_time:=true odom_image_decimation:=2 \
   hydra:=$(b $HYDRA) recorder:=$(b $RECORDER) segmentation:=$(b $SEG) \
   log_path:=$OUT/hydra observation_path:=$OUT/observations $LAUNCH_ARGS \
   < /dev/null > "$LOGS/launch.log" 2>&1 &

@@ -6,6 +6,13 @@
 #   float32 TIFF: 3.5 MB -> 0.4 MB per frame
 # - 4 writer threads (PNG encoding is CPU bound: one thread managed only ~11 fps of 720p RGB +
 #   depth PNGs and blocked Hydra 40 s in a 60 s run) and a deeper queue for disk flushes
+# - loop closures come verified from RTAB-Map (rt.launch.yaml slam:=true, rtabmap_hydra_bridge.py):
+#   GNC off and loop-closure variance 1e-3. With GNC on, closures that move the trajectory a lot
+#   were rejected as outliers (all 6 on office_walk7 with variance 1e-3); with variance 5e-2 the
+#   mesh/odometry edges (1e-2) dominated and the loop only partly closed (walk7 start-end
+#   1.11 -> 0.39 m vs RTAB-Map 0.13 m). Now walk7 1.21 -> 0.13 m (RTAB-Map 0.09 m),
+#   walk8 0.24 -> 0.07 m (0.03 m). RTAB-Map's own RANSAC check and graph-error rejection are
+#   the outlier filter.
 # output_path is overridden per run
 ---
 map_window:
@@ -115,6 +122,7 @@ backend:
     interp_horizon: 10.0
     optimizer:
       type: KimeraRpgoOptimizer
+      use_gnc: false
       solver: LM
       gnc:
         inlier_probability: 0.9
@@ -123,7 +131,7 @@ backend:
     add_initial_prior: true
     covariance:
       odom: 1.0e-02
-      loop_close: 5.0e-02
+      loop_close: 1.0e-03
       sg_loop_close: 1.0e-01
       prior: 1.0e-02
       mesh_mesh: 1.0e-02
