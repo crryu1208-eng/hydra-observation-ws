@@ -50,7 +50,7 @@ for r in hydra:Hydra hydra_ros:Hydra-ROS semantic_inference:semantic_inference; 
 done
 
 # realtime branch (realtime/): changes on branch feature/realtime of the hydra,
-# semantic_inference and kimera_pgmo forks
+# semantic_inference, kimera_pgmo and rtabmap_ros forks
 RT_BRANCH=feature/realtime
 git -C src/kimera_pgmo remote get-url fork >/dev/null 2>&1 \
   || git -C src/kimera_pgmo remote add fork "https://github.com/crryu1208-eng/Kimera-PGMO.git"
@@ -63,6 +63,14 @@ for name in hydra semantic_inference kimera_pgmo; do
   fi
   echo "$name: $RT_BRANCH ($(git -C "src/$name" rev-parse --short HEAD))"
 done
+# rtabmap_odom with the wait_imu_to_init fix (the map is levelled from the IMU also when odometry
+# starts on a streaming camera), rtabmap_ros 0.23.13-jazzy + one commit; every other rtabmap_ros
+# package has a COLCON_IGNORE there and comes from the ROS packages
+if [ ! -d src/rtabmap_ros/.git ]; then
+  git clone --quiet --branch "$RT_BRANCH" https://github.com/crryu1208-eng/rtabmap_ros.git src/rtabmap_ros
+fi
+git -C src/rtabmap_ros checkout --quiet "$RT_BRANCH"
+echo "rtabmap_ros: $RT_BRANCH ($(git -C src/rtabmap_ros rev-parse --short HEAD), builds rtabmap_odom only)"
 
 # same build options as the original PC (container has only system OpenCV)
 cat > colcon_defaults.yaml <<'EOF'

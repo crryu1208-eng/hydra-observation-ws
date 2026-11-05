@@ -31,7 +31,7 @@ fi
 echo "live viewer started (log $VIEWER_LOG)"
 
 env_args=()
-for v in FPS RES VIS STOP_AFTER CAM_NICE PIN CAM_CPUS PIPE_CPUS; do
+for v in FPS RES VIS STOP_AFTER CAM_NICE CAM_HEIGHT PIN CAM_CPUS PIPE_CPUS; do
   [ -n "${!v:-}" ] && env_args+=(-e "$v=${!v}")
 done
 tty=(-i); [ -t 0 ] && tty=(-it)

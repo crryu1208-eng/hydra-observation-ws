@@ -8,7 +8,7 @@
 # Output: /root/data/realtime/<session>/{bag,observations,hydra,rtabmap,logs}
 # Press Enter (or Ctrl-C) to stop. Env: FPS (default 15), RES (color and depth size, default
 # 1280x720, the D435i depth maximum; 640x480 for the earlier sessions), VIS=1 starts the Hydra visualizer,
-# CAM_NICE (camera driver nice value, default -10), CAM_CPUS / PIPE_CPUS (CPU pinning, PIN=0 off), STOP_AFTER=<s> stops automatically (non-interactive runs), LIVE=0 turns off the live scene graph
+# CAM_NICE (camera driver nice value, default -10), CAM_HEIGHT (camera height when the floor is not in view at the start, default 0), CAM_CPUS / PIPE_CPUS (CPU pinning, PIN=0 off), STOP_AFTER=<s> stops automatically (non-interactive runs), LIVE=0 turns off the live scene graph
 # files for the DSG viewer (<session>/hydra/live; on the host:
 #   tools/dsg_viewer/run.sh --live ~/hydra_data/realtime/<session>).
 #
@@ -35,6 +35,11 @@ LIVE="${LIVE:-1}"
 # and every frame without aligned depth is a frame not recorded. Negative = higher priority
 # (the container runs privileged); CAM_NICE=0 restores the default.
 CAM_NICE="${CAM_NICE:--10}"
+# map frame: z up and the floor at z = 0. Odometry levels the map from the IMU (wait_imu_to_init,
+# needs the workspace's patched rtabmap_odom); realtime/floor_init.py measures the camera's height
+# above the floor (depth, gravity-aligned) while the camera is held still at the start, and
+# odometry starts at that height. CAM_HEIGHT (m) is used when no floor is in view.
+CAM_HEIGHT="${CAM_HEIGHT:-0}"
 STOP_AFTER="${STOP_AFTER:-}"
 # CPU pinning: the camera driver gets its own P-cores, everything else (Hydra, segmentation,
 # odometry, SLAM, bag, monitors) the rest. Under the mapping load the driver lost raw depth
@@ -64,6 +69,10 @@ fi
 source /opt/ros/jazzy/setup.bash
 source $WS/install/setup.bash
 export SEMANTIC_INFERENCE_MODEL_DIR=$WS/.models
+if [ "$(ros2 pkg prefix rtabmap_odom)" = /opt/ros/jazzy ]; then
+  echo "WARNING: rtabmap_odom is the ROS package, not the workspace's patched one: the map may not"
+  echo "         be level (setup_workspace.sh, then colcon build --packages-select rtabmap_odom)"
+fi
 # keep DDS on this machine: the container uses host networking, and a handheld session
 # unplugs the laptop's network, which must not affect node-to-node traffic
 export ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST
@@ -119,6 +128,10 @@ BAG_PID=$!; PIDS+=($BAG_PID)
 
 # let auto exposure settle so odometry does not initialize on a bad first frame
 sleep 3
+echo "measuring the floor height (hold the camera still, the floor in view)"
+POSE=$(python3 $RT/floor_init.py --default-height "$CAM_HEIGHT" 2> >(tee "$RUN_LOGS/floor_init.log" >&2)) \
+  || { echo "could not measure the start pose, see $RUN_LOGS/floor_init.log"; exit 1; }
+echo "odometry start pose (x y z roll pitch yaw): $POSE"
 vis=false; [ "$VIS" = 1 ] && vis=true
 live=false; [ "$LIVE" = 1 ] && live=true
 if $live && ! python3 -c "import spark_dsg" 2>/dev/null; then
@@ -126,7 +139,7 @@ if $live && ! python3 -c "import spark_dsg" 2>/dev/null; then
   exit 1
 fi
 mkdir -p "$OUT/rtabmap"
-ros2 launch $RT/rt.launch.yaml \
+ros2 launch $RT/rt.launch.yaml odom_initial_pose:="$POSE" \
   log_path:=$LOG_PATH observation_path:=$OBS start_visualizer:=$vis \
   odom_image_decimation:=$ODOM_DECIMATION \
   seg_fp16:=true seg_debug_images:=false hydra_config:=$RT/hydra_rt.yaml \
@@ -139,7 +152,8 @@ wait_log "$RUN_LOGS/launch.log" "IExecutionContext creation" 600
 echo "segmentation engine ready"
 wait_log "$RUN_LOGS/launch.log" "\[hydra\]: Running..." 60
 echo "waiting for odometry to track (hold the camera still, facing a textured scene)"
-python3 $WS/src/hydra-realtime/scripts/d435i_monitor.py --wait-tracking 60 || exit 1
+python3 $WS/src/hydra-realtime/scripts/d435i_monitor.py --wait-tracking 60 --reset-pose "$POSE" || exit 1
+python3 $RT/floor_init.py --check 2>&1 | tee -a "$RUN_LOGS/floor_init.log" || true
 python3 $WS/src/hydra-realtime/scripts/d435i_monitor.py --watch "$OBS/frames_raw.jsonl" < /dev/null &
 MON_PID=$!; PIDS+=($MON_PID)
 echo

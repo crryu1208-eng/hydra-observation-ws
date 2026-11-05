@@ -6,7 +6,9 @@ usage (in the hydra-dev container):
   python3 d435i_monitor.py --watch <frames_raw.jsonl>    print a status line every 2 s
 
 --wait-tracking calls /rtabmap/reset_odom when odometry stays lost (e.g. it initialized on a
-frame taken while auto exposure was still settling, after which it never recovers).
+frame taken while auto exposure was still settling, after which it never recovers); with
+--reset-pose "x y z roll pitch yaw" it calls /rtabmap/reset_odom_to_pose instead, so the reset
+keeps the levelled start pose (realtime/floor_init.py) rather than going back to identity.
 """
 
 import argparse
@@ -44,6 +46,7 @@ def main():
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--wait-tracking", type=float, metavar="TIMEOUT_S")
     group.add_argument("--watch", metavar="FRAMES_RAW")
+    parser.add_argument("--reset-pose", metavar="'X Y Z ROLL PITCH YAW'")
     args = parser.parse_args()
 
     rclpy.init()
@@ -61,7 +64,15 @@ def main():
             bad[0] += 1
 
     node.create_subscription(OdomInfo, "/rtabmap/odom_info", on_info, 50, raw=True)
-    reset = node.create_client(Empty, "/rtabmap/reset_odom")
+    if args.reset_pose:
+        from rtabmap_msgs.srv import ResetPose
+        reset = node.create_client(ResetPose, "/rtabmap/reset_odom_to_pose")
+        reset_req = ResetPose.Request()
+        (reset_req.x, reset_req.y, reset_req.z,
+         reset_req.roll, reset_req.pitch, reset_req.yaw) = map(float, args.reset_pose.split())
+    else:
+        reset = node.create_client(Empty, "/rtabmap/reset_odom")
+        reset_req = Empty.Request()
 
     start = time.time()
     if args.wait_tracking is not None:
@@ -76,7 +87,7 @@ def main():
                 lost_since = lost_since or now
                 if now - lost_since > RESET_AFTER_S and reset.service_is_ready():
                     print("odometry lost, resetting (point the camera at a textured scene)", flush=True)
-                    reset.call_async(Empty.Request())
+                    reset.call_async(reset_req)
                     lost_since = None
             else:
                 lost_since = None

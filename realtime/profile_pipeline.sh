@@ -10,6 +10,7 @@
 #      the recorded odometry, is not played; IMU is),
 #      SLAM=1 adds live RTAB-Map SLAM (loop closures) on that odometry,
 #      REC=1 also records the raw bag like run_realtime.sh (its CPU and disk load),
+#      ODOM_POSE="x y z roll pitch yaw" (odometry start pose, see floor_init.py --bag),
 #      LAUNCH_ARGS (extra ros2 launch args), SAVE_LABELS=1 (keep every 10th label image for
 #      accuracy comparisons, see compare_labels.py)
 # Output: /root/data/realtime/profile/<tag>/{summary.json,logs,observations,hydra}
@@ -41,6 +42,7 @@ b() { [ "$1" = 1 ] && echo true || echo false; }
 ros2 launch $RT/rt.launch.yaml odometry:=$(b $ODOM) slam:=$(b $SLAM) slam_db:=$OUT/rtabmap.db bridge_log:=$OUT/logs/bridge.jsonl use_sim_time:=true odom_image_decimation:=2 \
   hydra:=$(b $HYDRA) recorder:=$(b $RECORDER) segmentation:=$(b $SEG) \
   log_path:=$OUT/hydra observation_path:=$OUT/observations $LAUNCH_ARGS \
+  ${ODOM_POSE:+"odom_initial_pose:=$ODOM_POSE"} \
   < /dev/null > "$LOGS/launch.log" 2>&1 &
 LAUNCH_PID=$!
 MON_PID=
