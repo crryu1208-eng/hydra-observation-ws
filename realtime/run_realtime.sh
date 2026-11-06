@@ -8,7 +8,7 @@
 # Output: /root/data/realtime/<session>/{bag,observations,hydra,rtabmap,logs}
 # Press Enter (or Ctrl-C) to stop. Env: FPS (default 15), RES (color and depth size, default
 # 1280x720, the D435i depth maximum; 640x480 for the earlier sessions), VIS=1 starts the Hydra visualizer,
-# CAM_NICE (camera driver nice value, default -10), CAM_HEIGHT (camera height when the floor is not in view at the start, default 0), CAM_CPUS / PIPE_CPUS (CPU pinning, PIN=0 off), STOP_AFTER=<s> stops automatically (non-interactive runs), LIVE=0 turns off the live scene graph
+# CAM_NICE (camera driver nice value, default -10), CAM_HEIGHT (camera height when the floor is not in view at the start, default 0), FLOOR_LOCK=0 (no floor height lock, for sessions that change floors), CAM_CPUS / PIPE_CPUS (CPU pinning, PIN=0 off), STOP_AFTER=<s> stops automatically (non-interactive runs), LIVE=0 turns off the live scene graph
 # files for the DSG viewer (<session>/hydra/live; on the host:
 #   tools/dsg_viewer/run.sh --live ~/hydra_data/realtime/<session>).
 #
@@ -40,6 +40,11 @@ CAM_NICE="${CAM_NICE:--10}"
 # above the floor (depth, gravity-aligned) while the camera is held still at the start, and
 # odometry starts at that height. CAM_HEIGHT (m) is used when no floor is in view.
 CAM_HEIGHT="${CAM_HEIGHT:-0}"
+# the height stays on the floor while walking: realtime/gravity_odom.py keeps the odometry level
+# with the accelerometer and its height on the floor seen in the depth (floor at z = 0). Without a
+# floor at the start the first stable floor below the camera becomes z = 0. FLOOR_LOCK=0 turns the
+# floor height off (sessions that change floors, e.g. stairs); levelling stays on.
+FLOOR_LOCK="${FLOOR_LOCK:-1}"
 STOP_AFTER="${STOP_AFTER:-}"
 # CPU pinning: the camera driver gets its own P-cores, everything else (Hydra, segmentation,
 # odometry, SLAM, bag, monitors) the rest. Under the mapping load the driver lost raw depth
@@ -122,7 +127,7 @@ echo "camera up"
 ros2 bag record -s sqlite3 --disable-keyboard-controls -o "$BAG" \
   $CAM/color/image_raw $CAM/color/camera_info \
   $CAM/aligned_depth_to_color/image_raw $CAM/aligned_depth_to_color/camera_info \
-  $CAM/imu /tf /tf_static /rtabmap/odom /rtabmap/odom_info \
+  $CAM/imu /tf /tf_static /rtabmap/odom /rtabmap/odom_raw /rtabmap/odom_info \
   < /dev/null > "$RUN_LOGS/bag_record.log" 2>&1 &
 BAG_PID=$!; PIDS+=($BAG_PID)
 
@@ -132,6 +137,11 @@ echo "measuring the floor height (hold the camera still, the floor in view)"
 POSE=$(python3 $RT/floor_init.py --default-height "$CAM_HEIGHT" 2> >(tee "$RUN_LOGS/floor_init.log" >&2)) \
   || { echo "could not measure the start pose, see $RUN_LOGS/floor_init.log"; exit 1; }
 echo "odometry start pose (x y z roll pitch yaw): $POSE"
+floor_lock=false; [ "$FLOOR_LOCK" = 1 ] && floor_lock=true
+floor_auto=false
+if $floor_lock && ! grep -q "m below the camera (" "$RUN_LOGS/floor_init.log"; then
+  floor_auto=true; echo "no floor at the start: the first floor seen while walking becomes z = 0"
+fi
 vis=false; [ "$VIS" = 1 ] && vis=true
 live=false; [ "$LIVE" = 1 ] && live=true
 if $live && ! python3 -c "import spark_dsg" 2>/dev/null; then
@@ -140,6 +150,7 @@ if $live && ! python3 -c "import spark_dsg" 2>/dev/null; then
 fi
 mkdir -p "$OUT/rtabmap"
 ros2 launch $RT/rt.launch.yaml odom_initial_pose:="$POSE" \
+  gravity_floor:=$floor_lock gravity_floor_auto:=$floor_auto \
   log_path:=$LOG_PATH observation_path:=$OBS start_visualizer:=$vis \
   odom_image_decimation:=$ODOM_DECIMATION \
   seg_fp16:=true seg_debug_images:=false hydra_config:=$RT/hydra_rt.yaml \
@@ -193,4 +204,6 @@ python3 $WS/src/hydra/scripts/map_observations.py "$OBS" "$LOG_PATH" --max-ancho
   --max-anchor-angle-deg 180 \
   > "$RUN_LOGS/map_observations.log" 2>&1 || echo "map_observations failed, see $RUN_LOGS"
 python3 $WS/src/hydra-realtime/scripts/verify_d435i.py "$OUT" | tee "$RUN_LOGS/verify.log" || true
+# last check of the finished map: floor plane fit, levelled copy in <session>/levelled
+python3 $RT/level_session.py "$OUT" 2>&1 | tee "$RUN_LOGS/level_session.log" || true
 echo "done: $OUT"

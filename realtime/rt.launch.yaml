@@ -19,6 +19,19 @@ launch:
   # 0 0 0" (floor at z = 0); with an identity rotation roll / pitch still come from the IMU
   # (wait_imu_to_init)
   - arg: {name: odom_initial_pose, default: ''}
+  # weight of the IMU gravity constraint in the odometry's local bundle adjustment (rtabmap
+  # Optimizer/GravitySigma, rad; smaller = stiffer)
+  - arg: {name: odom_gravity_sigma, default: '0.3'}
+  # keep the odometry level with the accelerometer (realtime/gravity_odom.py): rgbd_odometry
+  # publishes /rtabmap/odom_raw without TF, gravity_odom.py /rtabmap/odom and odom -> camera_link.
+  # office_rt8 replay: floor tilt 6.1 -> 0.35 deg, floor height spread (p2..p98) 76 -> 6 cm
+  - arg: {name: gravity_odom, default: 'true'}
+  - arg: {name: gravity_tau, default: '2.0'}
+  # ... and its height from the floor seen in the aligned depth (floor at z = 0); off for sessions
+  # that change floors. gravity_floor_auto: the start height was a guess (no floor in view), the
+  # first stable floor below the camera becomes z = 0
+  - arg: {name: gravity_floor, default: 'true'}
+  - arg: {name: gravity_floor_auto, default: 'false'}
   # profiling switches
   - arg: {name: hydra, default: 'true'}
   # live RTAB-Map SLAM (loop closure detection + graph optimization) on the odometry above;
@@ -58,7 +71,7 @@ launch:
         - {name: frame_id, value: camera_link}
         - {name: use_sim_time, value: $(var use_sim_time)}
         - {name: odom_frame_id, value: odom}
-        - {name: publish_tf, value: true}
+        - {name: publish_tf, value: $(if $(var gravity_odom) false true)}
         - {name: approx_sync, value: false}  # aligned depth carries the color stamp
         # explicit reliable QoS (1): the default (0, system default) only reached ~3 Hz with
         # realsense2_camera's reliable/transient_local publishers; with 1 odometry runs at 15 Hz
@@ -76,6 +89,7 @@ launch:
         - {name: wait_imu_to_init, value: true}
         - {name: initial_pose, value: "'$(var odom_initial_pose)'"}
         - {name: always_check_imu_tf, value: true}
+        - {name: Optimizer/GravitySigma, value: "'$(var odom_gravity_sigma)'"}
         # fewer features (defaults 1000/2000): ~57 ms per frame alongside Hydra and segmentation
         # left ~24% of frames without odometry at 15 Hz
         - {name: Vis/MaxFeatures, value: '600'}
@@ -86,6 +100,17 @@ launch:
         - {from: depth/image, to: $(var depth)}
         - {from: rgb/camera_info, to: $(var info)}
         - {from: imu, to: /rtabmap/imu}
+        - {from: odom, to: $(if $(var gravity_odom) /rtabmap/odom_raw /rtabmap/odom)}
+
+  - executable:
+      if: $(var gravity_odom)
+      cmd: >-
+        python3 $(dirname)/gravity_odom.py --ros-args -p use_sim_time:=$(var use_sim_time)
+        -p tau_s:=$(var gravity_tau) -r odom_in:=/rtabmap/odom_raw -r odom_out:=/rtabmap/odom
+        -p floor_height:=$(var gravity_floor) -p floor_auto:=$(var gravity_floor_auto)
+        -r imu:=$(var camera_ns)/imu -r depth:=$(var depth)
+        -r depth_info:=$(var camera_ns)/aligned_depth_to_color/camera_info
+      output: screen
 
   - node:
       if: $(var slam)
