@@ -108,7 +108,7 @@ launch:
         python3 $(dirname)/gravity_odom.py --ros-args -p use_sim_time:=$(var use_sim_time)
         -p tau_s:=$(var gravity_tau) -r odom_in:=/rtabmap/odom_raw -r odom_out:=/rtabmap/odom
         -p floor_height:=$(var gravity_floor) -p floor_auto:=$(var gravity_floor_auto)
-        -r imu:=$(var camera_ns)/imu -r depth:=$(var depth)
+        -r imu:=$(var camera_ns)/imu -r depth:=$(var depth) -r semantic:=$(var camera_ns)/semantic/image_raw
         -r depth_info:=$(var camera_ns)/aligned_depth_to_color/camera_info
       output: screen
 

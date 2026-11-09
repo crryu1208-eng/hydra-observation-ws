@@ -32,6 +32,10 @@ office_rt8 full-pipeline replay (floor tilt / mean floor height / floor p2..p98)
   levelling + floor height 1.0 deg / 0.00 m / -7..+8 cm (per-frame floor -0.08..+0.02 m over 80 s);
   start height 0 with floor_auto: floor found after ~4 s, then 0 +- 0.08 m (map -13..+21 cm:
   the first seconds were integrated at the wrong height)
+office_rt9 (live, no floor in view at the start, floor_auto jumped the height 1.32 m after 17 s):
+  loop closures to the keyframes before the jump pulled the backend floor to -1.55 m. Replay with
+  the odometry held until the floor-labelled floor is found (after ~20 s): backend floor median
+  -0.10 m, map floor p2..p98 -19..+1 cm, tilt 0.7 deg
 
 Inputs:  odom_in (nav_msgs/Odometry, rgbd_odometry with publish_tf false), imu (raw D435i, the
          accelerometer is enough), /tf_static (camera_link -> IMU / depth frames),
@@ -101,6 +105,21 @@ class GravityOdom(Node):
         self.floor_gate_max = self.declare_parameter("floor_gate_max", 0.4).value
         self.last_fix_t = None
         self.floor_auto = self.declare_parameter("floor_auto", False).value
+        # floor_auto: nothing is published until the floor is found (a later height jump would
+        # contradict the keyframes taken before it; office_rt9: loop closures to those keyframes
+        # pulled the whole backend map 1.5 m down); after floor_auto_timeout_s without a floor the
+        # guessed height is used and only the gated floor lock remains
+        # (the camera is then put at floor_auto_height, a typical handheld height, so the floor
+        # comes within the gate)
+        self.floor_auto_timeout = self.declare_parameter("floor_auto_timeout_s", 30.0).value
+        self.floor_auto_height = self.declare_parameter("floor_auto_height", 1.3).value
+        # floor_auto takes only pixels the segmentation calls floor (semantic image, labelspace
+        # ids; ade20k_full floor = 3): by height alone a desk or chair seat looked like a floor
+        # (office_rt9 replay: "floor" 0.36 m below the camera)
+        self.floor_label = self.declare_parameter("floor_label", 3).value
+        self.sem = deque(maxlen=30)  # (stamp_ns, Image) semantic images
+        self.t_first = None
+        self.n_held = 0
         self.zoff = 0.0  # height correction added to the levelled odometry
         self.floor_ready = not self.floor_auto
         self.auto_samples = []
@@ -124,6 +143,9 @@ class GravityOdom(Node):
                                  QoSProfile(depth=100, durability=DurabilityPolicy.TRANSIENT_LOCAL))
         if self.floor_on:
             self.create_subscription(CameraInfo, "depth_info", self.on_info, QoSProfile(depth=5))
+            if self.floor_auto:
+                # reliable: best effort lost ~1/3 of the label images while the floor was searched
+                self.create_subscription(Image, "semantic", self.on_semantic, QoSProfile(depth=10), raw=True)
             self.create_subscription(Image, "depth", self.on_depth,
                                      QoSProfile(depth=2, reliability=ReliabilityPolicy.BEST_EFFORT), raw=True)
         self.n_out = 0
@@ -132,7 +154,8 @@ class GravityOdom(Node):
 
     def status(self):
         tilt = math.degrees(math.acos(max(-1.0, min(1.0, self.C[2, 2]))))
-        self.get_logger().info(f"{self.n_out} odometry messages, correction {tilt:.2f} deg, height "
+        held = "" if self.floor_ready else f", held until the floor is found: {self.n_held}"
+        self.get_logger().info(f"{self.n_out} odometry messages{held}, correction {tilt:.2f} deg, height "
                                f"{self.zoff:+.3f} m (floor seen {self.n_floor[0]} / {self.n_floor[1]}; skipped {self.why})")
 
     def on_imu(self, msg):
@@ -167,6 +190,14 @@ class GravityOdom(Node):
         self.pending = deserialize_message(data, Image)  # its pose comes ~50-100 ms later
         self.try_floor()
 
+    def on_semantic(self, data):
+        if self.floor_ready:
+            return
+        msg = deserialize_message(data, Image)
+        self.sem.append((msg.header.stamp.sec * 1_000_000_000 + msg.header.stamp.nanosec, msg))
+        if self.pending is not None:
+            self.try_floor()
+
     def try_floor(self):
         msg = self.pending
         if msg is None or not self.poses:
@@ -178,6 +209,22 @@ class GravityOdom(Node):
                 self.why["no pose for the image stamp"] = self.why.get("no pose for the image stamp", 0) + 1
                 self.pending = None
             return
+        sem = None
+        if not self.floor_ready:
+            sem = next((m for s, m in reversed(self.sem) if s == stamp), None)
+            if sem is None:
+                if not self.sem or self.sem[-1][0] <= stamp:
+                    return  # its labels have not arrived yet
+                self.why["no labels for the image stamp"] = self.why.get("no labels for the image stamp", 0) + 1
+                self.pending = None
+                return
+            dt = {"8UC1": np.uint8, "mono8": np.uint8, "16UC1": np.uint16, "mono16": np.uint16,
+                  "16SC1": np.int16, "32SC1": np.int32}.get(sem.encoding)
+            if dt is None or (sem.height, sem.width) != (msg.height, msg.width):
+                why = f"labels {sem.encoding} {sem.width}x{sem.height}"
+                self.why[why] = self.why.get(why, 0) + 1
+                self.pending = None
+                return
         self.pending = None
         T = self.tf.lookup(msg.header.frame_id)
         why = (f"no tf for {msg.header.frame_id}" if T is None else f"encoding {msg.encoding}"
@@ -190,6 +237,13 @@ class GravityOdom(Node):
         v, u = np.mgrid[0:msg.height:6, 0:msg.width:6]
         d = d.astype(np.float64) / 1000.0
         ok = (d > 0.3) & (d < 4.0)
+        if sem is not None:
+            isz = np.dtype(dt).itemsize
+            lab = np.frombuffer(sem.data, dt).reshape(sem.height, sem.step // isz)[::6, :sem.width:6]
+            n_ok = int(ok.sum())
+            ok &= lab == self.floor_label
+            if ok.sum() < max(300, 0.05 * n_ok):  # floor less than 5% of the view
+                return
         d, u, v = d[ok], u[ok], v[ok]
         if len(d) < 500:
             return
@@ -205,7 +259,7 @@ class GravityOdom(Node):
                    self.floor_gate + self.floor_gate_growth * max(0.0, t_img - self.last_fix_t))
         if self.floor_ready:
             lo, hi = -gate, gate
-        else:  # floor_auto: anything 0.2 - 2.5 m below the camera
+        else:  # floor_auto: floor-labelled points 0.2 - 2.5 m below the camera
             lo, hi = p[2] - 2.5, p[2] - 0.2
         z = self.floor_layer(zw, lo, hi)
         if z is None:
@@ -213,13 +267,18 @@ class GravityOdom(Node):
         self.n_floor[0] += 1
         self.last_fix_t = t_img
         if not self.floor_ready:
+            # the floor: the lowest height that 3 of the last 10 floor-labelled samples agree on
+            # (within 5 cm)
             self.auto_samples.append(z)
-            a = self.auto_samples[-5:]
-            if len(a) == 5 and max(a) - min(a) < 0.05:
-                self.zoff -= float(np.median(a))
-                self.floor_ready = True
-                self.get_logger().info(f"floor_auto: floor found {-np.median(a):.3f} m below z = 0, "
-                                       "it is z = 0 from now on")
+            a = np.sort(self.auto_samples[-10:])
+            for z0 in a:
+                near = a[np.abs(a - z0) < 0.025]
+                if len(near) >= 3:
+                    self.zoff -= float(np.median(near))
+                    self.floor_ready = True
+                    self.get_logger().info(f"floor_auto: floor found {-np.median(near):.3f} m below z = 0, "
+                                           "it is z = 0 from now on")
+                    break
             return
         self.zoff -= self.floor_gain * z
 
@@ -271,6 +330,18 @@ class GravityOdom(Node):
         self.poses.append((msg.header.stamp.sec * 1_000_000_000 + msg.header.stamp.nanosec, Ro, p_out))
         if self.pending is not None:
             self.try_floor()
+        if self.t_first is None:
+            self.t_first = t
+        if not self.floor_ready:
+            if t - self.t_first < self.floor_auto_timeout:
+                self.n_held += 1
+                return
+            self.floor_ready = True
+            self.zoff = self.floor_auto_height - self.last[2][2]
+            self.get_logger().warn(f"floor_auto: no floor after {self.floor_auto_timeout:.0f} s, starting "
+                                   f"with the camera {self.floor_auto_height:.2f} m above the floor "
+                                   "(floor lock within the gate only)")
+        p_out = self.last[2] + np.array([0.0, 0.0, self.zoff])  # zoff may have changed in try_floor
         qo = rot_to_quat(Ro)
         out = msg
         out.pose.pose.position.x, out.pose.pose.position.y, out.pose.pose.position.z = map(float, p_out)
