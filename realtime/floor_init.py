@@ -24,7 +24,9 @@ applies (Odometry::process checks the rotation only). Measured while the camera 
   floor_init.py --bag <dir> [--start s]   the measurement on a recorded session bag
 
 The floor is the lowest dense horizontal layer of depth points below the camera (in the
-gravity-aligned frame), between 0.2 and 2.5 m down. Diagnostics go to stderr.
+gravity-aligned frame), between MIN_BELOW (0.6) and 2.5 m down: a handheld camera is not closer to
+the floor than that, and with 0.2 m a desk top 0.3 m below the camera was taken (office_rt1 / rt3 /
+rt4: map 0.9-1.0 m low). Diagnostics go to stderr.
 """
 import argparse
 import math
@@ -98,6 +100,9 @@ def up_in_base(accels, imu_frame, tf):
     return T[0] @ mean, jitter, np.linalg.norm(mean)
 
 
+MIN_BELOW = 0.6
+
+
 def floor_height(depth_mm, info_k, depth_frame, R_level, tf):
     T = tf.lookup(depth_frame)
     if T is None:
@@ -111,10 +116,11 @@ def floor_height(depth_mm, info_k, depth_frame, R_level, tf):
         return None, "too few depth pixels"
     p = np.stack([(u - cx) * d / fx, (v - cy) * d / fy, d], 1)
     z = (p @ (R_level @ T[0]).T)[:, 2] + (R_level @ T[1])[2]
-    cand = z[(z > -2.5) & (z < -0.2)]
+    cand = z[(z > -2.5) & (z < -MIN_BELOW)]
     if len(cand) < 0.015 * len(z):
-        return None, f"only {100 * len(cand) / len(z):.1f}% of the depth points are 0.2-2.5 m below the camera"
-    hist, edges = np.histogram(cand, bins=np.arange(-2.5, -0.2 + 1e-9, 0.02))
+        return None, (f"only {100 * len(cand) / len(z):.1f}% of the depth points are "
+                      f"{MIN_BELOW}-2.5 m below the camera")
+    hist, edges = np.histogram(cand, bins=np.arange(-2.5, -MIN_BELOW + 1e-9, 0.02))
     dense = np.nonzero((hist >= 0.3 * hist.max()) & (hist >= 0.015 * len(z)))[0]
     if len(dense) == 0:
         return None, "no dense horizontal layer below the camera"

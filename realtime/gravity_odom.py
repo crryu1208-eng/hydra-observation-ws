@@ -285,8 +285,8 @@ class GravityOdom(Node):
                    self.floor_gate + self.floor_gate_growth * max(0.0, t_img - self.last_fix_t))
         if self.floor_ready:
             lo, hi = -gate, gate
-        else:  # floor_auto: floor-labelled points 0.2 - 2.5 m below the camera
-            lo, hi = p[2] - 2.5, p[2] - 0.2
+        else:  # floor_auto: floor-labelled points 0.6 - 2.5 m below the camera (floor_init.py)
+            lo, hi = p[2] - 2.5, p[2] - 0.6
         z = self.floor_layer(zw, lo, hi)
         if z is None:
             return
@@ -349,13 +349,16 @@ class GravityOdom(Node):
         R = quat_to_rot((q.x, q.y, q.z, q.w))
         p = msg.pose.pose.position
         p = np.array([p.x, p.y, p.z])
-        if self.last is None or np.linalg.norm(p - self.last[1]) > self.jump_m:
-            # first message or an odometry reset to a given pose: restart from it
-            if self.last is not None:
-                self.get_logger().warn("odometry jumped (reset): correction restarted")
+        if self.last is None:
             self.C = np.eye(3)
-            self.zoff = 0.0 if self.floor_ready and not self.floor_auto else self.zoff
             p_out = p
+        elif np.linalg.norm(p - self.last[1]) > self.jump_m:
+            # more than reset_jump_m in one update is not camera motion: an odometry glitch.
+            # Keep the levelling and the height and drop that step (it used to restart the
+            # correction, office_rt10 replay: 0.5 m jump at 54 s)
+            self.get_logger().warn(f"odometry jumped {np.linalg.norm(p - self.last[1]):.2f} m in "
+                                   "one update: step dropped, levelling kept")
+            p_out = self.last[2]
         else:
             dt = max(0.0, t - self.last[0])
             u = self.up(t)
