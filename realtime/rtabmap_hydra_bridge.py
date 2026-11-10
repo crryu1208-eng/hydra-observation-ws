@@ -118,7 +118,7 @@ class Bridge(Node):
         # (1e-3) -> 1527 (1e-5), floor plane tilt 20.6 -> 0.04 deg; the rest is near the loop
         # closure (mesh nodes still tilt). level_stiffness 0 leaves the edges without covariance
         any_number = ParameterDescriptor(dynamic_typing=True)  # "0" from the launch file is an int
-        self.odom_variance = float(self.declare_parameter("odom_variance", 1.0e-2, any_number).value)
+        self.odom_variance = float(self.declare_parameter("odom_variance", 1.0e-4, any_number).value)
         self.level_stiffness = float(self.declare_parameter("level_stiffness", 1.0e-5, any_number).value)
         reliable = QoSProfile(depth=100, history=HistoryPolicy.KEEP_LAST,
                               reliability=ReliabilityPolicy.RELIABLE)

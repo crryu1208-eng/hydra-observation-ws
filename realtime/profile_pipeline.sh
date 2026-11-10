@@ -11,6 +11,9 @@
 #      ODOM=raw plays the recorded /rtabmap/odom_raw (rgbd_odometry's live output) and the IMU and
 #      runs gravity_odom.py and everything after it (gravity_odom must be true),
 #      ODOM=0 with SLAM=1 plays the recorded /rtabmap/odom for SLAM,
+#      ODOM=poses POSES=<session>/observations/frames.jsonl publishes the session's corrected
+#      per-frame poses as odom -> camera_link (realtime/pose_tf_player.py) instead of the bag's /tf
+#      (map rebuild with the loop-closed poses; use SLAM=0),
 #      SLAM=1 adds live RTAB-Map SLAM (loop closures) on that odometry,
 #      REC=1 also records the raw bag like run_realtime.sh (its CPU and disk load),
 #      ODOM_POSE="x y z roll pitch yaw" (odometry start pose, see floor_init.py --bag),
@@ -86,6 +89,13 @@ if [ "$HYDRA" = 1 ]; then
 fi
 sleep 2
 
+PTF_PID=
+if [ "$ODOM" = poses ]; then
+  python3 $RT/pose_tf_player.py --ros-args -p frames:="$POSES" -p use_sim_time:=true \
+    < /dev/null > "$LOGS/pose_tf_player.log" 2>&1 &
+  PTF_PID=$!
+  sleep 1
+fi
 python3 $RT/stage_monitor.py --out "$OUT/summary.json" ${SAVE_LABELS:+--save-labels $OUT/labels} --frames-raw "$OUT/observations/frames_raw.jsonl" \
   < /dev/null > "$LOGS/monitor.log" 2>&1 &
 MON_PID=$!
@@ -111,11 +121,11 @@ ros2 bag play "$SRC/bag" --clock -r "$RATE" --disable-keyboard-controls \
   --qos-profile-overrides-path $QOS \
   --topics $CAM/color/image_raw $CAM/color/camera_info \
   $CAM/aligned_depth_to_color/image_raw $CAM/aligned_depth_to_color/camera_info /tf_static \
-  $( case "$ODOM" in 1) echo $CAM/imu ;; raw) echo $CAM/imu /rtabmap/odom_raw ;; *) echo /tf ;; esac ) \
+  $( case "$ODOM" in 1) echo $CAM/imu ;; raw) echo $CAM/imu /rtabmap/odom_raw ;; poses) ;; *) echo /tf ;; esac ) \
   $( [ "$ODOM" = 0 ] && [ "$SLAM" = 1 ] && echo /rtabmap/odom ) \
   < /dev/null > "$LOGS/bag_play.log" 2>&1
 sleep 5   # let the tail of the pipeline arrive
-kill $GPU_PID $TOP_PID 2>/dev/null || true
+kill $GPU_PID $TOP_PID $PTF_PID 2>/dev/null || true
 [ -n "$REC_PID" ] && { kill -INT $REC_PID; wait $REC_PID || true; }
 kill -INT $MON_PID; wait $MON_PID || true
 if [ "$HYDRA" = 1 ]; then

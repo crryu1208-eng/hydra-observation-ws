@@ -51,6 +51,10 @@ launch:
   # odometry edges stiff in roll / pitch / height (x this factor of Hydra's odometry variance);
   # 0: one isotropic variance as before
   - arg: {name: bridge_level_stiffness, default: '0.00001'}
+  # variance of the odometry edges in x / y (yaw x 1e-2). Hydra's backend odom default 1e-2 (10 cm
+  # per keyframe step) let the loop closures (1e-3) pull single keyframes: office_rt11 corrected
+  # poses jumped 3-21 cm at 65 keyframe changes; 1e-4: 5 jumps, revisits 12.7 -> 4.5 cm apart
+  - arg: {name: bridge_odom_variance, default: '0.0001'}
   # live scene graph files for tools/dsg_viewer --live (realtime/live_dsg_dump.py)
   - arg: {name: live_dsg, default: 'false'}
   - arg: {name: live_dsg_dir, default: /root/data/realtime/default/hydra/live}
@@ -155,7 +159,7 @@ launch:
       cmd: >-
         python3 $(dirname)/rtabmap_hydra_bridge.py --ros-args
         -p use_sim_time:=$(var use_sim_time) -p log_path:=$(var bridge_log) -p reset_variance:=$(var bridge_reset_variance)
-        -p level_stiffness:=$(var bridge_level_stiffness)
+        -p level_stiffness:=$(var bridge_level_stiffness) -p odom_variance:=$(var bridge_odom_variance)
       output: screen
 
   - executable:

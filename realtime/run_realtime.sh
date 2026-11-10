@@ -8,7 +8,7 @@
 # Output: /root/data/realtime/<session>/{bag,observations,hydra,rtabmap,logs}
 # Press Enter (or Ctrl-C) to stop. Env: FPS (default 15), RES (color and depth size, default
 # 1280x720, the D435i depth maximum; 640x480 for the earlier sessions), VIS=1 starts the Hydra visualizer,
-# CAM_NICE (camera driver nice value, default -10), CAM_HEIGHT (camera height when the floor is not in view at the start, default 0), FLOOR_LOCK=0 (no floor height lock, for sessions that change floors), CAM_CPUS / PIPE_CPUS (CPU pinning, PIN=0 off), STOP_AFTER=<s> stops automatically (non-interactive runs), LIVE=0 turns off the live scene graph
+# CAM_NICE (camera driver nice value, default -10), CAM_HEIGHT (camera height when the floor is not in view at the start, default 0), FLOOR_LOCK=0 (no floor height lock, for sessions that change floors), CAM_CPUS / PIPE_CPUS (CPU pinning, PIN=0 off), STOP_AFTER=<s> stops automatically (non-interactive runs), REBUILD=0 skips rebuilding the map with the loop-closed poses after recording (<session>/rebuilt, about the session's length), LIVE=0 turns off the live scene graph
 # files for the DSG viewer (<session>/hydra/live; on the host:
 #   tools/dsg_viewer/run.sh --live ~/hydra_data/realtime/<session>).
 #
@@ -34,6 +34,7 @@ W="${RES%x*}"; H="${RES#*x}"
 # RTAB-Map odometry detects features on a decimated image so its cost stays at the 640-wide level
 ODOM_DECIMATION=1; [ "$W" -ge 1280 ] && ODOM_DECIMATION=2
 VIS="${VIS:-0}"
+REBUILD="${REBUILD:-1}"
 LIVE="${LIVE:-1}"
 # camera driver priority: realsense2_camera aligns depth to color on the CPU; on office_rt3 its
 # aligned depth fell from 14 to 11.6 Hz once Hydra's load grew (+2 cores after loop closures),
@@ -231,6 +232,14 @@ python3 $WS/src/hydra/scripts/map_observations.py "$OBS" "$LOG_PATH" --max-ancho
   --max-anchor-angle-deg 180 \
   > "$RUN_LOGS/map_observations.log" 2>&1 || echo "map_observations failed, see $RUN_LOGS"
 python3 $WS/src/hydra-realtime/scripts/verify_d435i.py "$OUT" | tee "$RUN_LOGS/verify.log" || true
+# the map again with the loop-closed per-frame poses (<session>/rebuilt): mesh, objects and places
+# then agree with the poses the frames carry (the live backend mesh is deformed only approximately)
+if [ "$REBUILD" = 1 ]; then
+  bash $RT/rebuild_map.sh "$OUT" 2>&1 | tee "$RUN_LOGS/rebuild.log" || echo "rebuild failed, see $RUN_LOGS/rebuild.log"
+fi
 # last check of the finished map: floor plane fit, levelled copy in <session>/levelled
 python3 $RT/level_session.py "$OUT" 2>&1 | tee "$RUN_LOGS/level_session.log" || true
+if [ -f "$OUT/rebuilt/hydra/backend/dsg_with_mesh.json" ]; then
+  python3 $RT/level_session.py "$OUT/rebuilt" 2>&1 | tee -a "$RUN_LOGS/level_session.log" || true
+fi
 echo "done: $OUT"
