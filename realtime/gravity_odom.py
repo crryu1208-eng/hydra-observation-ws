@@ -36,6 +36,10 @@ office_rt9 (live, no floor in view at the start, floor_auto jumped the height 1.
   loop closures to the keyframes before the jump pulled the backend floor to -1.55 m. Replay with
   the odometry held until the floor-labelled floor is found (after ~20 s): backend floor median
   -0.10 m, map floor p2..p98 -19..+1 cm, tilt 0.7 deg
+office_rt10 (live): 0.8 s tracking loss while turning, the heading came back 25-30 deg off and
+  the loop closure had to correct 38 deg of yaw. Its recorded odom_raw replayed with the gyro
+  heading bridge: heading corrected +24.7 deg at the loss, closure 13-14 deg, backend floor
+  vertices raised > 0.2 m 1527 -> 0 (map floor p2..p98 -3..+4 cm)
 
 Inputs:  odom_in (nav_msgs/Odometry, rgbd_odometry with publish_tf false), imu (raw D435i, the
          accelerometer is enough), /tf_static (camera_link -> IMU / depth frames),
@@ -132,6 +136,13 @@ class GravityOdom(Node):
         self.tf = StaticTf()
         self.R_imu = None  # camera_link <- IMU frame
         self.accel = deque(maxlen=400)  # (stamp_s, a in camera_link)
+        # across a tracking loss rgbd_odometry restarts at its last pose (Odom/ResetCountdown 1):
+        # the rotation during the loss is missing (office_rt10: 0.5 s lost while turning at
+        # ~50 deg/s, 30 deg of the 38 deg yaw drift); it is taken from the gyro instead
+        self.gyro = deque(maxlen=4000)  # (stamp_s, w in camera_link)
+        self.gyro_max_gap = self.declare_parameter("gyro_bridge_max_s", 5.0).value
+        self.lost = False
+        self.last_Ro = None  # last published orientation
         self.C = np.eye(3)
         self.last = None  # (stamp_s, p_odom, p_out)
         self.pub = self.create_publisher(Odometry, "odom_out", QoSProfile(depth=100))
@@ -164,9 +175,24 @@ class GravityOdom(Node):
             if T is None:
                 return
             self.R_imu = T[0]
-        a = msg.linear_acceleration
-        self.accel.append((msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9,
-                           self.R_imu @ np.array([a.x, a.y, a.z])))
+        a, w = msg.linear_acceleration, msg.angular_velocity
+        ts = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+        self.accel.append((ts, self.R_imu @ np.array([a.x, a.y, a.z])))
+        self.gyro.append((ts, self.R_imu @ np.array([w.x, w.y, w.z])))
+
+    def gyro_rotation(self, t0, t1):
+        """Body rotation (camera_link, R(t0)^T R(t1)) integrated from the gyro, or None."""
+        g = [(s, w) for s, w in self.gyro if t0 < s <= t1]
+        if len(g) < 5 or g[0][0] - t0 > 0.05 or t1 - g[-1][0] > 0.05:
+            return None
+        Rr = np.eye(3)
+        prev = t0
+        for s, w in g:
+            n = np.linalg.norm(w)
+            if n > 1e-9:
+                Rr = Rr @ axis_angle(w / n, n * (s - prev))
+            prev = s
+        return Rr
 
     def up(self, t):
         a = [v for s, v in self.accel if t - self.window < s <= t + 0.005]
@@ -297,9 +323,26 @@ class GravityOdom(Node):
         layer = cand[(cand > z0 - 0.03) & (cand < z0 + 0.05)]
         return float(np.median(layer))
 
+    def bridge_loss(self, t, R):
+        """After a tracking loss: turn the world about z so the heading follows the gyro."""
+        t0 = self.last[0]
+        if t - t0 > self.gyro_max_gap:
+            self.get_logger().warn(f"tracking lost for {t - t0:.1f} s: heading not bridged")
+            return
+        Rr = self.gyro_rotation(t0, t)
+        if Rr is None:
+            self.get_logger().warn("tracking lost: no gyro for the gap, heading not bridged")
+            return
+        d = (self.last_Ro @ Rr) @ (self.C @ R).T  # gyro-predicted vs odometry orientation
+        yaw = math.atan2(d[1, 0] - d[0, 1], d[0, 0] + d[1, 1])
+        self.C = axis_angle((0.0, 0.0, 1.0), yaw) @ self.C
+        self.get_logger().info(f"tracking lost for {t - t0:.2f} s: heading corrected by "
+                               f"{math.degrees(yaw):+.1f} deg from the gyro")
+
     def on_odom(self, msg):
         q = msg.pose.pose.orientation
         if q.x == q.y == q.z == q.w == 0.0:  # lost (publish_null_when_lost): pass through
+            self.lost = True
             self.pub.publish(msg)
             return
         t = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
@@ -323,10 +366,14 @@ class GravityOdom(Node):
                 if s > 1e-9:
                     ang = math.asin(min(s, 1.0)) * min(1.0, dt / self.tau)
                     self.C = axis_angle(e / s, ang) @ self.C
+            if self.lost and self.last_Ro is not None:
+                self.bridge_loss(t, R)
             p_out = self.last[2] + self.C @ (p - self.last[1])
+        self.lost = False
         self.last = (t, p, p_out)
         p_out = p_out + np.array([0.0, 0.0, self.zoff])
         Ro = self.C @ R
+        self.last_Ro = Ro
         self.poses.append((msg.header.stamp.sec * 1_000_000_000 + msg.header.stamp.nanosec, Ro, p_out))
         if self.pending is not None:
             self.try_floor()

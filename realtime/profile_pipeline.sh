@@ -8,6 +8,9 @@
 #      depth 500 like reprocessing; default depth 5, closer to a live camera driver),
 #      ODOM=1 runs RTAB-Map RGB-D odometry live on the bag images (the bag's /tf, which has
 #      the recorded odometry, is not played; IMU is),
+#      ODOM=raw plays the recorded /rtabmap/odom_raw (rgbd_odometry's live output) and the IMU and
+#      runs gravity_odom.py and everything after it (gravity_odom must be true),
+#      ODOM=0 with SLAM=1 plays the recorded /rtabmap/odom for SLAM,
 #      SLAM=1 adds live RTAB-Map SLAM (loop closures) on that odometry,
 #      REC=1 also records the raw bag like run_realtime.sh (its CPU and disk load),
 #      ODOM_POSE="x y z roll pitch yaw" (odometry start pose, see floor_init.py --bag),
@@ -108,8 +111,8 @@ ros2 bag play "$SRC/bag" --clock -r "$RATE" --disable-keyboard-controls \
   --qos-profile-overrides-path $QOS \
   --topics $CAM/color/image_raw $CAM/color/camera_info \
   $CAM/aligned_depth_to_color/image_raw $CAM/aligned_depth_to_color/camera_info /tf_static \
-  $( [ "$ODOM" = 1 ] && echo $CAM/imu || echo /tf ) \
-  $( [ "$ODOM" != 1 ] && [ "$SLAM" = 1 ] && echo /rtabmap/odom ) \
+  $( case "$ODOM" in 1) echo $CAM/imu ;; raw) echo $CAM/imu /rtabmap/odom_raw ;; *) echo /tf ;; esac ) \
+  $( [ "$ODOM" = 0 ] && [ "$SLAM" = 1 ] && echo /rtabmap/odom ) \
   < /dev/null > "$LOGS/bag_play.log" 2>&1
 sleep 5   # let the tail of the pipeline arrive
 kill $GPU_PID $TOP_PID 2>/dev/null || true

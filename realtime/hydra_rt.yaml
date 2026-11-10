@@ -146,6 +146,10 @@ backend:
       prior: 1.0e-02
       mesh_mesh: 1.0e-02
       pose_mesh: 1.0e-02
+      # roll / pitch prior on each mesh node (kimera_pgmo feature/realtime; the odometry is
+      # levelled with gravity): without it a 38 deg yaw loop closure still tilted the mesh near
+      # the closure (office_rt10, 1527 floor vertices lifted > 0.2 m)
+      mesh_level: 1.0e-06
       place_mesh: 1.0e-02
       place_edge: 10.0
       place_merge: 10.0
