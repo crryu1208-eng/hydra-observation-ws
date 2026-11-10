@@ -109,6 +109,11 @@ CAM_PID=$!; PIDS+=($CAM_PID)
 
 LAUNCH_PID=; ODOM_PID=
 echo "session $OUT (${W}x${H} @ $FPS fps)"
+echo "=== Before RECORDING appears (about 12 s): ==="
+echo "===   1. hold the camera still                                                          ==="
+echo "===   2. point it at the floor (1-2 m away, more than 0.6 m below the camera): the floor  ==="
+echo "===      height becomes z = 0; without a floor in view mapping waits until one is seen  ==="
+echo "===   3. keep a textured scene in view (no blank wall) so odometry starts tracking       ==="
 
 stop_pid() {  # stop_pid <pid> <timeout_s>: SIGINT, then SIGTERM if it does not exit in time
   kill -INT "$1" 2>/dev/null || return 0
