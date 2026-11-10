@@ -109,6 +109,7 @@ ros2 bag play "$SRC/bag" --clock -r "$RATE" --disable-keyboard-controls \
   --topics $CAM/color/image_raw $CAM/color/camera_info \
   $CAM/aligned_depth_to_color/image_raw $CAM/aligned_depth_to_color/camera_info /tf_static \
   $( [ "$ODOM" = 1 ] && echo $CAM/imu || echo /tf ) \
+  $( [ "$ODOM" != 1 ] && [ "$SLAM" = 1 ] && echo /rtabmap/odom ) \
   < /dev/null > "$LOGS/bag_play.log" 2>&1
 sleep 5   # let the tail of the pipeline arrive
 kill $GPU_PID $TOP_PID 2>/dev/null || true

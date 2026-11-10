@@ -36,6 +36,7 @@ from geometry_msgs.msg import Pose
 from nav_msgs.msg import Odometry
 from pose_graph_tools_msgs.msg import PoseGraph, PoseGraphEdge, PoseGraphNode
 from rclpy.node import Node
+from rcl_interfaces.msg import ParameterDescriptor
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from rtabmap_msgs.msg import MapData
 
@@ -108,6 +109,17 @@ class Bridge(Node):
         self.frame_id = self.declare_parameter("frame_id", "odom").value
         self.log_path = self.declare_parameter("log_path", "").value
         self.reset_variance = self.declare_parameter("reset_variance", 1.0e4).value
+        # odometry edges get a covariance that is stiff in roll / pitch / height (the odometry is
+        # levelled with gravity and its height held at the floor, realtime/gravity_odom.py) and
+        # keeps Hydra's odometry variance (backend covariance odom; rotation x 1e-2 as in
+        # kimera_pgmo) for x / y / yaw. With one isotropic variance a 38 deg yaw loop closure
+        # (office_rt10) was spread partly as roll / pitch: nodes tilted 13 deg and rose 0.5 m.
+        # office_rt10 with its live odometry: backend floor vertices raised > 0.2 m 7383 -> 2113
+        # (1e-3) -> 1527 (1e-5), floor plane tilt 20.6 -> 0.04 deg; the rest is near the loop
+        # closure (mesh nodes still tilt). level_stiffness 0 leaves the edges without covariance
+        any_number = ParameterDescriptor(dynamic_typing=True)  # "0" from the launch file is an int
+        self.odom_variance = float(self.declare_parameter("odom_variance", 1.0e-2, any_number).value)
+        self.level_stiffness = float(self.declare_parameter("level_stiffness", 1.0e-5, any_number).value)
         reliable = QoSProfile(depth=100, history=HistoryPolicy.KEEP_LAST,
                               reliability=ReliabilityPolicy.RELIABLE)
         self.pg_pub = self.create_publisher(PoseGraph, "/hydra/pose_graph", reliable)
@@ -177,18 +189,33 @@ class Bridge(Node):
             e.type = PoseGraphEdge.ODOM
             e.pose = mat_to_pose(np.linalg.inv(prev[2]) @ T)  # prev_T_curr
             if node.map_id != self.last_map_id:
-                e.covariance = [self.reset_variance if i % 7 == 0 else 0.0 for i in range(36)]
+                v = self.reset_variance  # rotation x 1e-2 as kimera_pgmo's scalar variance
+                e.covariance = list(np.diag([v, v, v, 1e-2 * v, 1e-2 * v, 1e-2 * v]).ravel())
                 self.get_logger().warn(
                     f"keyframe {node.id} starts RTAB-Map map {node.map_id} (tracking reset): "
                     f"odometry edge variance {self.reset_variance}")
+            elif self.level_stiffness > 0:
+                e.covariance = list(self.level_covariance(T[:3, :3]).ravel())
             graph.edges.append(e)
         self.pg_pub.publish(graph)
+
         reset = prev is not None and node.map_id != self.last_map_id
         self.last_id = node.id
         self.last_map_id = node.map_id
         self.write_log({"event": "keyframe", "rtabmap_id": node.id, "key": index,
                         "stamp_ns": stamp_ns, "map_id": node.map_id, "reset_edge": reset,
                         "wall": time.time()})
+
+    def level_covariance(self, world_R_body):
+        """6x6 covariance (x y z rx ry rz) in the body frame of the edge's to-node: Hydra's
+        odometry variance for x / y / yaw, level_stiffness times that for z / roll / pitch
+        (world axes)."""
+        v, k = self.odom_variance, self.level_stiffness
+        Rt = world_R_body.T
+        cov = np.zeros((6, 6))
+        cov[:3, :3] = Rt @ np.diag([v, v, k * v]) @ Rt.T
+        cov[3:, 3:] = Rt @ np.diag([1e-2 * k * v, 1e-2 * k * v, 1e-2 * v]) @ Rt.T
+        return cov
 
     def add_closures(self, links):
         graph = PoseGraph()

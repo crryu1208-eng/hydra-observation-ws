@@ -44,6 +44,9 @@ launch:
   - arg: {name: bridge_log, default: none}
   # odometry variance of the edge across a tracking reset (0: use Hydra's odometry variance)
   - arg: {name: bridge_reset_variance, default: '10000.0'}
+  # odometry edges stiff in roll / pitch / height (x this factor of Hydra's odometry variance);
+  # 0: one isotropic variance as before
+  - arg: {name: bridge_level_stiffness, default: '0.00001'}
   # live scene graph files for tools/dsg_viewer --live (realtime/live_dsg_dump.py)
   - arg: {name: live_dsg, default: 'false'}
   - arg: {name: live_dsg_dir, default: /root/data/realtime/default/hydra/live}
@@ -148,6 +151,7 @@ launch:
       cmd: >-
         python3 $(dirname)/rtabmap_hydra_bridge.py --ros-args
         -p use_sim_time:=$(var use_sim_time) -p log_path:=$(var bridge_log) -p reset_variance:=$(var bridge_reset_variance)
+        -p level_stiffness:=$(var bridge_level_stiffness)
       output: screen
 
   - executable:
