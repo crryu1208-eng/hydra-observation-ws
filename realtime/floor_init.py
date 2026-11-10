@@ -167,7 +167,7 @@ def from_bag(args):
 
 
 class Live:
-    def __init__(self, check):
+    def __init__(self, check, odom_topic="/rtabmap/odom"):
         import rclpy
         from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
         from sensor_msgs.msg import CameraInfo, Image, Imu
@@ -187,7 +187,7 @@ class Live:
         self.node.create_subscription(Image, DEPTH, self.on_depth, rel)
         if check:
             from nav_msgs.msg import Odometry
-            self.node.create_subscription(Odometry, "/rtabmap/odom", self.on_odom, rel)
+            self.node.create_subscription(Odometry, odom_topic, self.on_odom, rel)
 
     def on_imu(self, m):
         self.imu_frame = m.header.frame_id
@@ -223,19 +223,22 @@ def main():
     ap.add_argument("--default-height", type=float, default=0.0)
     ap.add_argument("--max-jitter", type=float, default=0.3, help="m/s^2, larger: camera moving")
     ap.add_argument("--attempts", type=int, default=10)
+    # --check: rgbd_odometry's own output; /rtabmap/odom (gravity_odom) is held while floor_auto
+    # waits for the floor
+    ap.add_argument("--odom-topic", default="/rtabmap/odom")
     args = ap.parse_args()
 
     if args.bag:
         tf, acc, imu_frame, info, depth = from_bag(args)
     else:
-        live = Live(args.check)
+        live = Live(args.check, args.odom_topic)
         if not live.spin(lambda: len(live.tf.edges) > 3 and live.info is not None and len(live.acc) > 0, args.timeout):
             log("no camera data (tf_static / camera_info / imu)")
             return 1
         if args.check:
             live.acc.clear()
             if not live.spin(lambda: live.odom is not None, args.timeout):
-                log("no odometry pose on /rtabmap/odom")
+                log(f"no odometry pose on {args.odom_topic}")
                 return 1
             live.spin(lambda: False, args.duration)
             up, jitter, g = up_in_base(live.acc, live.imu_frame, live.tf)

@@ -12,6 +12,10 @@ launch:
   # bag reprocessing: odometry:=false (the bag's /tf already has odom -> camera_link from the
   # live RTAB-Map run) and use_sim_time:=true (bag played with --clock)
   - arg: {name: odometry, default: 'true'}
+  # part: all (default), mapping (segmentation, Hydra, live dump, odom -> map) or odometry
+  # (rgbd_odometry, IMU filter, gravity_odom, RTAB-Map SLAM, bridge): run_realtime.sh starts the
+  # mapping part while the floor height is measured and the odometry part with the start pose
+  - arg: {name: part, default: all}
   - arg: {name: use_sim_time, default: 'false'}
   # RTAB-Map odometry image decimation: 2 at 1280x720 keeps feature detection at 640x360
   - arg: {name: odom_image_decimation, default: '1'}
@@ -65,7 +69,7 @@ launch:
 
   # pose: RTAB-Map visual odometry, publishes odom -> camera_link
   - node:
-      if: $(var odometry)
+      if: $(eval "'$(var odometry)'.lower() in ('true', '1') and '$(var part)' != 'mapping'")
       pkg: rtabmap_odom
       exec: rgbd_odometry
       name: rgbd_odometry
@@ -106,7 +110,7 @@ launch:
         - {from: odom, to: $(if $(var gravity_odom) /rtabmap/odom_raw /rtabmap/odom)}
 
   - executable:
-      if: $(var gravity_odom)
+      if: $(eval "'$(var gravity_odom)'.lower() in ('true', '1') and '$(var part)' != 'mapping'")
       cmd: >-
         python3 $(dirname)/gravity_odom.py --ros-args -p use_sim_time:=$(var use_sim_time)
         -p tau_s:=$(var gravity_tau) -r odom_in:=/rtabmap/odom_raw -r odom_out:=/rtabmap/odom
@@ -116,7 +120,7 @@ launch:
       output: screen
 
   - node:
-      if: $(var slam)
+      if: $(eval "'$(var slam)'.lower() in ('true', '1') and '$(var part)' != 'mapping'")
       pkg: rtabmap_slam
       exec: rtabmap
       name: rtabmap
@@ -147,7 +151,7 @@ launch:
         - {from: odom, to: /rtabmap/odom}
 
   - executable:
-      if: $(var slam)
+      if: $(eval "'$(var slam)'.lower() in ('true', '1') and '$(var part)' != 'mapping'")
       cmd: >-
         python3 $(dirname)/rtabmap_hydra_bridge.py --ros-args
         -p use_sim_time:=$(var use_sim_time) -p log_path:=$(var bridge_log) -p reset_variance:=$(var bridge_reset_variance)
@@ -155,7 +159,7 @@ launch:
       output: screen
 
   - executable:
-      if: $(var live_dsg)
+      if: $(eval "'$(var live_dsg)'.lower() in ('true', '1') and '$(var part)' != 'odometry'")
       cmd: >-
         python3 $(dirname)/live_dsg_dump.py --ros-args
         -p use_sim_time:=$(var use_sim_time) -p out_dir:=$(var live_dsg_dir)
@@ -163,7 +167,7 @@ launch:
 
   # orientation for the raw D435i IMU (gyro + accel, no magnetometer)
   - node:
-      if: $(var odometry)
+      if: $(eval "'$(var odometry)'.lower() in ('true', '1') and '$(var part)' != 'mapping'")
       pkg: imu_filter_madgwick
       exec: imu_filter_madgwick_node
       name: imu_filter
@@ -179,7 +183,7 @@ launch:
 
   # 2D semantic segmentation (TensorRT); publishes <camera_ns>/semantic/image_raw
   - group:
-      if: $(var segmentation)
+      if: $(eval "'$(var segmentation)'.lower() in ('true', '1') and '$(var part)' != 'odometry'")
       children:
       - push_ros_namespace: {namespace: $(var camera_ns)}
       - include:
@@ -202,7 +206,7 @@ launch:
   - set_remap: {from: hydra/input/camera/rgb/camera_info, to: $(var info)}
   - set_remap: {from: hydra/input/camera/semantic/image_raw, to: $(var camera_ns)/semantic/image_raw}
   - include:
-      if: $(var hydra)
+      if: $(eval "'$(var hydra)'.lower() in ('true', '1') and '$(var part)' != 'odometry'")
       file: $(find-pkg-share hydra_ros)/launch/hydra.launch.yaml
       arg:
         - {name: dataset, value: d435i}
@@ -219,6 +223,7 @@ launch:
         - {name: extra_yaml, value: '{active_window: {observation_recorder: {enable: $(var recorder), output_path: $(var observation_path)}}$(if $(var slam) ", frontend: {pose_graph_tracker: {type: RosPoseGraphs}}")}'}
   - node:
       pkg: tf2_ros
+      if: $(eval "'$(var part)' != 'odometry'")
       name: odom_to_map
       exec: static_transform_publisher
       args: --frame-id odom --child-frame-id map

@@ -12,6 +12,11 @@
 # files for the DSG viewer (<session>/hydra/live; on the host:
 #   tools/dsg_viewer/run.sh --live ~/hydra_data/realtime/<session>).
 #
+# Startup: camera, bag record, then segmentation + Hydra (rt.launch.yaml part:=mapping, logs/launch.log)
+# while the exposure settles and floor_init.py measures the start height, then the odometry part
+# (rgbd_odometry, gravity_odom, RTAB-Map SLAM, bridge; part:=odometry, logs/launch_odom.log) with
+# that start pose. logs/startup.log has the timeline (office_rt10, one launch: ~15-18 s to RECORDING).
+#
 # Stop order: camera first (no new frames), then wait until the recorder output stops growing
 # (Hydra's stop() does not drain its input queues), then /hydra/shutdown, then map frames to
 # trajectory nodes.
@@ -83,6 +88,12 @@ fi
 export ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST
 mkdir -p "$RUN_LOGS"
 : > "$RUN_LOGS/launch.log"  # wait_log greps it before hydra is launched
+T0=$(date +%s.%N)
+stamp() {  # startup timeline: logs/startup.log, seconds since the script started
+  awk -v t="$(date +%s.%N)" -v t0="$T0" -v m="$*" 'BEGIN { printf "%6.1f s  %s\n", t - t0, m }' \
+    >> "$RUN_LOGS/startup.log"
+}
+stamp "start"
 
 PIDS=()
 cleanup() { for p in "${PIDS[@]}"; do kill -INT "$p" 2>/dev/null || true; done; }
@@ -96,7 +107,7 @@ cam_pin=(); [ "$PIN" = 1 ] && cam_pin=(taskset -c "$CAM_CPUS")
   < /dev/null > "$RUN_LOGS/camera.log" 2>&1 &
 CAM_PID=$!; PIDS+=($CAM_PID)
 
-LAUNCH_PID=
+LAUNCH_PID=; ODOM_PID=
 echo "session $OUT (${W}x${H} @ $FPS fps)"
 
 stop_pid() {  # stop_pid <pid> <timeout_s>: SIGINT, then SIGTERM if it does not exit in time
@@ -107,8 +118,8 @@ stop_pid() {  # stop_pid <pid> <timeout_s>: SIGINT, then SIGTERM if it does not 
 }
 
 wait_log() {  # wait_log <file> <pattern> <timeout_s>
-  for i in $(seq 1 "$3"); do
-    for p in $CAM_PID $LAUNCH_PID; do  # LAUNCH_PID is empty until hydra is launched
+  for i in $(seq 1 $(( $3 * 5 ))); do
+    for p in $CAM_PID $LAUNCH_PID $ODOM_PID; do  # empty until launched
       if ! kill -0 $p 2>/dev/null; then echo "a launch exited early, see $RUN_LOGS"; exit 1; fi
     done
     if grep -qE "\[(ERROR|FATAL)\].*(semantic_inference|engine)|failed to load or build engine" \
@@ -116,13 +127,13 @@ wait_log() {  # wait_log <file> <pattern> <timeout_s>
       echo "segmentation failed to start"; exit 1
     fi
     grep -q "$2" "$1" && return 0
-    sleep 1
+    sleep 0.2
   done
   echo "timeout waiting for: $2"; exit 1
 }
 
 wait_log "$RUN_LOGS/camera.log" "RealSense Node Is Up" 60
-echo "camera up"
+echo "camera up"; stamp "camera up"
 # record before Hydra is ready so the bag contains every frame Hydra sees
 ros2 bag record -s sqlite3 --disable-keyboard-controls -o "$BAG" \
   $CAM/color/image_raw $CAM/color/camera_info \
@@ -131,44 +142,54 @@ ros2 bag record -s sqlite3 --disable-keyboard-controls -o "$BAG" \
   < /dev/null > "$RUN_LOGS/bag_record.log" 2>&1 &
 BAG_PID=$!; PIDS+=($BAG_PID)
 
-# let auto exposure settle so odometry does not initialize on a bad first frame
-sleep 3
-echo "measuring the floor height (hold the camera still, the floor in view)"
-POSE=$(python3 $RT/floor_init.py --default-height "$CAM_HEIGHT" 2> >(tee "$RUN_LOGS/floor_init.log" >&2)) \
-  || { echo "could not measure the start pose, see $RUN_LOGS/floor_init.log"; exit 1; }
-echo "odometry start pose (x y z roll pitch yaw): $POSE"
-floor_lock=false; [ "$FLOOR_LOCK" = 1 ] && floor_lock=true
-floor_auto=false
-if $floor_lock && ! grep -q "m below the camera (" "$RUN_LOGS/floor_init.log"; then
-  floor_auto=true; echo "no floor at the start: the first floor seen while walking becomes z = 0"
-fi
-vis=false; [ "$VIS" = 1 ] && vis=true
+# segmentation and Hydra do not need the start pose: start them now (TensorRT engine load ~3 s)
+# while the exposure settles and the floor is measured; the odometry part follows with the pose
 live=false; [ "$LIVE" = 1 ] && live=true
 if $live && ! python3 -c "import spark_dsg" 2>/dev/null; then
   echo "LIVE=1 needs the spark_dsg python bindings: bash $RT/install_live_viewer_deps.sh (or LIVE=0)"
   exit 1
 fi
+vis=false; [ "$VIS" = 1 ] && vis=true
 mkdir -p "$OUT/rtabmap"
-ros2 launch $RT/rt.launch.yaml odom_initial_pose:="$POSE" \
-  gravity_floor:=$floor_lock gravity_floor_auto:=$floor_auto \
+ros2 launch $RT/rt.launch.yaml part:=mapping \
   log_path:=$LOG_PATH observation_path:=$OBS start_visualizer:=$vis \
-  odom_image_decimation:=$ODOM_DECIMATION \
   seg_fp16:=true seg_debug_images:=false hydra_config:=$RT/hydra_rt.yaml \
-  slam:=true slam_db:=$OUT/rtabmap/rtabmap.db bridge_log:=$RUN_LOGS/bridge.jsonl \
-  live_dsg:=$live live_dsg_dir:=$LOG_PATH/live \
+  slam:=true live_dsg:=$live live_dsg_dir:=$LOG_PATH/live \
   < /dev/null > "$RUN_LOGS/launch.log" 2>&1 &
-LAUNCH_PID=$!; PIDS+=($LAUNCH_PID)
+LAUNCH_PID=$!; PIDS+=($LAUNCH_PID); stamp "mapping launched"
+
+# let auto exposure settle so odometry does not initialize on a bad first frame
+sleep 3
+echo "measuring the floor height (hold the camera still, the floor in view)"
+POSE=$(python3 $RT/floor_init.py --default-height "$CAM_HEIGHT" 2> >(tee "$RUN_LOGS/floor_init.log" >&2)) \
+  || { echo "could not measure the start pose, see $RUN_LOGS/floor_init.log"; exit 1; }
+echo "odometry start pose (x y z roll pitch yaw): $POSE"; stamp "floor measured"
+floor_lock=false; [ "$FLOOR_LOCK" = 1 ] && floor_lock=true
+floor_auto=false
+if $floor_lock && ! grep -q "m below the camera (" "$RUN_LOGS/floor_init.log"; then
+  floor_auto=true; echo "no floor at the start: the first floor seen while walking becomes z = 0"
+fi
+ros2 launch $RT/rt.launch.yaml part:=odometry odom_initial_pose:="$POSE" \
+  gravity_floor:=$floor_lock gravity_floor_auto:=$floor_auto \
+  odom_image_decimation:=$ODOM_DECIMATION \
+  slam:=true slam_db:=$OUT/rtabmap/rtabmap.db bridge_log:=$RUN_LOGS/bridge.jsonl \
+  < /dev/null > "$RUN_LOGS/launch_odom.log" 2>&1 &
+ODOM_PID=$!; PIDS+=($ODOM_PID); stamp "odometry launched"
 
 wait_log "$RUN_LOGS/launch.log" "IExecutionContext creation" 600
-echo "segmentation engine ready"
+echo "segmentation engine ready"; stamp "segmentation engine ready"
 wait_log "$RUN_LOGS/launch.log" "\[hydra\]: Running..." 60
+stamp "hydra running"
 echo "waiting for odometry to track (hold the camera still, facing a textured scene)"
 python3 $WS/src/hydra-realtime/scripts/d435i_monitor.py --wait-tracking 60 --reset-pose "$POSE" || exit 1
-python3 $RT/floor_init.py --check 2>&1 | tee -a "$RUN_LOGS/floor_init.log" || true
+stamp "odometry tracking"
+# level check of the odometry start (diagnostic only): in the background, recording starts now
+{ python3 $RT/floor_init.py --check --odom-topic /rtabmap/odom_raw 2>&1 | tee -a "$RUN_LOGS/floor_init.log" || true; } < /dev/null &
 python3 $WS/src/hydra-realtime/scripts/d435i_monitor.py --watch "$OBS/frames_raw.jsonl" < /dev/null &
 MON_PID=$!; PIDS+=($MON_PID)
 echo
-echo "=== RECORDING. Move the camera slowly; avoid blank walls and fast turns. ==="
+stamp "recording"
+echo "=== RECORDING (startup $(tail -1 "$RUN_LOGS/startup.log" | awk '{print $1}') s). Move the camera slowly; avoid blank walls and fast turns. ==="
 $live && echo "=== Live map on the host: tools/dsg_viewer/run.sh --live ~/hydra_data/realtime/$NAME ==="
 echo "=== Press Enter (or Ctrl-C) to stop. ==="
 trap 'echo' INT
@@ -194,6 +215,7 @@ echo "recorder idle at $last frames, shutting down hydra"
 timeout 30 ros2 service call /hydra/shutdown std_srvs/srv/Empty > /dev/null || true
 for i in $(seq 1 300); do kill -0 $LAUNCH_PID 2>/dev/null || break; sleep 1; done
 stop_pid $LAUNCH_PID 30
+stop_pid $ODOM_PID 30
 trap - EXIT INT
 
 # handheld: the camera may pause for a while between trajectory nodes (a node needs ~0.5 m of
