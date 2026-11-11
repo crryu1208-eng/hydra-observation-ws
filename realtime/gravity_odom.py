@@ -117,10 +117,12 @@ class GravityOdom(Node):
         # comes within the gate)
         self.floor_auto_timeout = self.declare_parameter("floor_auto_timeout_s", 30.0).value
         self.floor_auto_height = self.declare_parameter("floor_auto_height", 1.3).value
-        # floor_auto takes only pixels the segmentation calls floor (semantic image, labelspace
-        # ids; ade20k_full floor = 3): by height alone a desk or chair seat looked like a floor
-        # (office_rt9 replay: "floor" 0.36 m below the camera)
-        self.floor_label = self.declare_parameter("floor_label", 3).value
+        # the floor (floor_auto and the height lock) is taken only from pixels the segmentation
+        # calls floor or rug (semantic image, labelspace ids; ade20k_full floor = 3, rug = 28): by
+        # height alone a desk or chair seat looked like a floor (office_rt9 replay: "floor" 0.36 m
+        # below the camera; office_rt13, a carpeted library lounge: the lock took ~0.4 m high chair
+        # seats / table tops for the floor and put the floor of half the map 0.6-0.78 m low)
+        self.floor_labels = list(self.declare_parameter("floor_labels", [3, 28]).value)
         self.sem = deque(maxlen=30)  # (stamp_ns, Image) semantic images
         self.t_first = None
         self.n_held = 0
@@ -154,9 +156,8 @@ class GravityOdom(Node):
                                  QoSProfile(depth=100, durability=DurabilityPolicy.TRANSIENT_LOCAL))
         if self.floor_on:
             self.create_subscription(CameraInfo, "depth_info", self.on_info, QoSProfile(depth=5))
-            if self.floor_auto:
-                # reliable: best effort lost ~1/3 of the label images while the floor was searched
-                self.create_subscription(Image, "semantic", self.on_semantic, QoSProfile(depth=10), raw=True)
+            # reliable: best effort lost ~1/3 of the label images while the floor was searched
+            self.create_subscription(Image, "semantic", self.on_semantic, QoSProfile(depth=10), raw=True)
             self.create_subscription(Image, "depth", self.on_depth,
                                      QoSProfile(depth=2, reliability=ReliabilityPolicy.BEST_EFFORT), raw=True)
         self.n_out = 0
@@ -217,8 +218,6 @@ class GravityOdom(Node):
         self.try_floor()
 
     def on_semantic(self, data):
-        if self.floor_ready:
-            return
         msg = deserialize_message(data, Image)
         self.sem.append((msg.header.stamp.sec * 1_000_000_000 + msg.header.stamp.nanosec, msg))
         if self.pending is not None:
@@ -235,22 +234,21 @@ class GravityOdom(Node):
                 self.why["no pose for the image stamp"] = self.why.get("no pose for the image stamp", 0) + 1
                 self.pending = None
             return
-        sem = None
-        if not self.floor_ready:
-            sem = next((m for s, m in reversed(self.sem) if s == stamp), None)
-            if sem is None:
-                if not self.sem or self.sem[-1][0] <= stamp:
-                    return  # its labels have not arrived yet
-                self.why["no labels for the image stamp"] = self.why.get("no labels for the image stamp", 0) + 1
-                self.pending = None
-                return
-            dt = {"8UC1": np.uint8, "mono8": np.uint8, "16UC1": np.uint16, "mono16": np.uint16,
-                  "16SC1": np.int16, "32SC1": np.int32}.get(sem.encoding)
-            if dt is None or (sem.height, sem.width) != (msg.height, msg.width):
-                why = f"labels {sem.encoding} {sem.width}x{sem.height}"
-                self.why[why] = self.why.get(why, 0) + 1
-                self.pending = None
-                return
+        # floor-labelled pixels only (floor_labels): the labels of this image are needed
+        sem = next((m for s, m in reversed(self.sem) if s == stamp), None)
+        if sem is None:
+            if not self.sem or self.sem[-1][0] <= stamp:
+                return  # its labels have not arrived yet
+            self.why["no labels for the image stamp"] = self.why.get("no labels for the image stamp", 0) + 1
+            self.pending = None
+            return
+        dt = {"8UC1": np.uint8, "mono8": np.uint8, "16UC1": np.uint16, "mono16": np.uint16,
+              "16SC1": np.int16, "32SC1": np.int32}.get(sem.encoding)
+        if dt is None or (sem.height, sem.width) != (msg.height, msg.width):
+            why = f"labels {sem.encoding} {sem.width}x{sem.height}"
+            self.why[why] = self.why.get(why, 0) + 1
+            self.pending = None
+            return
         self.pending = None
         T = self.tf.lookup(msg.header.frame_id)
         why = (f"no tf for {msg.header.frame_id}" if T is None else f"encoding {msg.encoding}"
@@ -263,13 +261,12 @@ class GravityOdom(Node):
         v, u = np.mgrid[0:msg.height:6, 0:msg.width:6]
         d = d.astype(np.float64) / 1000.0
         ok = (d > 0.3) & (d < 4.0)
-        if sem is not None:
-            isz = np.dtype(dt).itemsize
-            lab = np.frombuffer(sem.data, dt).reshape(sem.height, sem.step // isz)[::6, :sem.width:6]
-            n_ok = int(ok.sum())
-            ok &= lab == self.floor_label
-            if ok.sum() < max(300, 0.05 * n_ok):  # floor less than 5% of the view
-                return
+        isz = np.dtype(dt).itemsize
+        lab = np.frombuffer(sem.data, dt).reshape(sem.height, sem.step // isz)[::6, :sem.width:6]
+        n_ok = int(ok.sum())
+        ok &= np.isin(lab, self.floor_labels)
+        if ok.sum() < max(300, 0.05 * n_ok):  # floor less than 5% of the view
+            return
         d, u, v = d[ok], u[ok], v[ok]
         if len(d) < 500:
             return
