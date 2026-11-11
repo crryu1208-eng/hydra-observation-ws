@@ -8,7 +8,7 @@
 # Output: /root/data/realtime/<session>/{bag,observations,hydra,rtabmap,logs}
 # Press Enter (or Ctrl-C) to stop. Env: FPS (default 15), RES (color and depth size, default
 # 1280x720, the D435i depth maximum; 640x480 for the earlier sessions), VIS=1 starts the Hydra visualizer,
-# CAM_NICE (camera driver nice value, default -10), CAM_HEIGHT (camera height when the floor is not in view at the start, default 0), FLOOR_LOCK=0 (no floor height lock, for sessions that change floors), CAM_CPUS / PIPE_CPUS (CPU pinning, PIN=0 off), STOP_AFTER=<s> stops automatically (non-interactive runs), REBUILD=0 skips rebuilding the map with the loop-closed poses after recording (<session>/rebuilt, about the session's length), LIVE=0 turns off the live scene graph
+# CAM_NICE (camera driver nice value, default -10), CAM_HEIGHT (camera height when the floor is not in view at the start, default 0), FLOOR_LOCK=0 (no floor height lock, for sessions that change floors), CAM_CPUS / PIPE_CPUS (CPU pinning, PIN=0 off), STOP_AFTER=<s> stops automatically (non-interactive runs), RECORD_IR=1 IR_EMITTER=on|off|onoff records the IR stereo pair, REBUILD=0 skips rebuilding the map with the loop-closed poses after recording (<session>/rebuilt, about the session's length), LIVE=0 turns off the live scene graph
 # files for the DSG viewer (<session>/hydra/live; on the host:
 #   tools/dsg_viewer/run.sh --live ~/hydra_data/realtime/<session>).
 #
@@ -35,6 +35,11 @@ W="${RES%x*}"; H="${RES#*x}"
 ODOM_DECIMATION=1; [ "$W" -ge 1280 ] && ODOM_DECIMATION=2
 VIS="${VIS:-0}"
 REBUILD="${REBUILD:-1}"
+# IR stereo for visual-inertial odometry tests: RECORD_IR=1 records infra1 / infra2 (same size and
+# rate as depth); IR_EMITTER on (default, the projector dots are in the IR images), off (clean IR,
+# weaker depth on blank surfaces) or onoff (projector every other frame)
+RECORD_IR="${RECORD_IR:-0}"
+IR_EMITTER="${IR_EMITTER:-on}"
 LIVE="${LIVE:-1}"
 # camera driver priority: realsense2_camera aligns depth to color on the CPU; on office_rt3 its
 # aligned depth fell from 14 to 11.6 Hz once Hydra's load grew (+2 cores after loop closures),
@@ -105,6 +110,7 @@ cam_pin=(); [ "$PIN" = 1 ] && cam_pin=(taskset -c "$CAM_CPUS")
   rgb_camera.color_profile:=$W,$H,$FPS depth_module.depth_profile:=$W,$H,$FPS \
   align_depth.enable:=true enable_sync:=true \
   enable_gyro:=true enable_accel:=true unite_imu_method:=2 \
+  $( [ "$RECORD_IR" = 1 ] && echo enable_infra1:=true enable_infra2:=true depth_module.infra_profile:=$W,$H,$FPS ) \
   < /dev/null > "$RUN_LOGS/camera.log" 2>&1 &
 CAM_PID=$!; PIDS+=($CAM_PID)
 
@@ -140,11 +146,32 @@ wait_log() {  # wait_log <file> <pattern> <timeout_s>
 
 wait_log "$RUN_LOGS/camera.log" "RealSense Node Is Up" 60
 echo "camera up"; stamp "camera up"
+if [ "$RECORD_IR" = 1 ]; then
+  case "$IR_EMITTER" in
+    off) ir_param=(depth_module.emitter_enabled 0) ;;
+    onoff) ir_param=(depth_module.emitter_on_off true) ;;
+    on) ir_param=() ;;
+    *) echo "IR_EMITTER must be on, off or onoff"; exit 1 ;;
+  esac
+  if [ ${#ir_param[@]} -gt 0 ]; then
+    # the camera node is up before ROS discovery finds it: retry for up to ~10 s
+    for i in $(seq 1 10); do
+      ros2 param set /camera/camera "${ir_param[@]}" >> "$RUN_LOGS/ir_emitter.log" 2>&1 && break
+      sleep 1
+    done
+    grep -q "^Set parameter successful" "$RUN_LOGS/ir_emitter.log" \
+      || { echo "could not set the IR emitter, see $RUN_LOGS/ir_emitter.log"; exit 1; }
+  fi
+  echo "IR stereo recorded, emitter $IR_EMITTER"
+fi
+IR_TOPICS=()
+[ "$RECORD_IR" = 1 ] && IR_TOPICS=($CAM/infra1/image_rect_raw $CAM/infra1/camera_info
+                                   $CAM/infra2/image_rect_raw $CAM/infra2/camera_info)
 # record before Hydra is ready so the bag contains every frame Hydra sees
 ros2 bag record -s sqlite3 --disable-keyboard-controls -o "$BAG" \
   $CAM/color/image_raw $CAM/color/camera_info \
   $CAM/aligned_depth_to_color/image_raw $CAM/aligned_depth_to_color/camera_info \
-  $CAM/imu /tf /tf_static /rtabmap/odom /rtabmap/odom_raw /rtabmap/odom_info \
+  $CAM/imu /tf /tf_static /rtabmap/odom /rtabmap/odom_raw /rtabmap/odom_info "${IR_TOPICS[@]}" \
   < /dev/null > "$RUN_LOGS/bag_record.log" 2>&1 &
 BAG_PID=$!; PIDS+=($BAG_PID)
 
