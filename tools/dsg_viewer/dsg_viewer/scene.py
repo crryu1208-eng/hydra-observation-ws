@@ -21,6 +21,8 @@ GROUP_STYLE = {  # color, point size (px)
 DEFAULT_STYLE = ("#888888", 8)
 SELECT_COLOR = "#ffd166"
 FRAME_COLOR = "#e63973"
+CLOSURE_COLOR = "#ff8c1a"  # loop closures (RTAB-Map via the bridge, logs/bridge.jsonl)
+CLOSURE_NEW_COLOR = "#ff1744"  # the newest ones, for a few seconds
 
 
 def quat_matrix(q_wxyz) -> np.ndarray:
@@ -80,6 +82,7 @@ class Options:
     frame_path: bool = False
     boxes: bool = True
     object_labels: bool = False
+    closures: bool = True
     hidden_groups: frozenset = frozenset()
 
 
@@ -97,6 +100,9 @@ class SceneView:
         self._frame_ids = np.zeros(0, dtype=np.int64)  # recorded frames on the trajectory (for picking)
         self._frame_pos = np.zeros((0, 3))
         self.current_frame: int | None = None
+        # loop closures: (from_stamp_ns, to_stamp_ns, highlighted); drawn between the agent
+        # (trajectory) nodes with those stamps
+        self.closures: list[tuple[int, int, bool]] = []
 
     # ---- geometry helpers -------------------------------------------------------------
     def display_pos(self, n: Node) -> np.ndarray:
@@ -133,7 +139,53 @@ class SceneView:
         self._build_boxes()
         self._build_selection()
         self._build_frame_marker()
+        self._build_closures()
         self.p.render()
+
+    def update_closures(self):
+        """Redraw only the loop closure lines (new closures, highlight ended)."""
+        if self.g is None:
+            return
+        self._drop("closures")
+        self._build_closures()
+        self.p.render()
+
+    def _build_closures(self):
+        if not self.opt.closures or not self.closures:
+            return
+        path = [n for n in self.g.agent_path() if n.timestamp_ns is not None]
+        if not path:
+            return
+        ts = np.array([n.timestamp_ns for n in path], dtype=np.int64)
+        pos = np.array([self.display_pos(n) for n in path])
+        order = np.argsort(ts)
+        ts, pos = ts[order], pos[order]
+
+        def at(stamp):  # agent node with this stamp (keyframes are agent nodes), else nearest within 0.5 s
+            i = int(np.clip(np.searchsorted(ts, stamp), 1, len(ts) - 1)) if len(ts) > 1 else 0
+            j = min((i - 1, i), key=lambda k: abs(int(ts[k]) - stamp)) if len(ts) > 1 else 0
+            return pos[j] if abs(int(ts[j]) - stamp) < 500_000_000 else None
+
+        for new in (False, True):
+            pts, pairs = [], []
+            for f, t, h in self.closures:
+                if h != new:
+                    continue
+                a, b = at(f), at(t)
+                if a is None or b is None:
+                    continue  # its keyframes are not in this (live) graph yet
+                pairs.append((len(pts), len(pts) + 1))
+                pts += [a, b]
+            if not pairs:
+                continue
+            pts = np.array(pts)
+            color, width = (CLOSURE_NEW_COLOR, 7) if new else (CLOSURE_COLOR, 3)
+            self._add("closures", self.p.add_mesh(_lines(pts, pairs), color=color, line_width=width,
+                                                  pickable=False, reset_camera=False))
+            if new:
+                self._add("closures", self.p.add_mesh(pv.PolyData(pts), color=color, point_size=20,
+                                                      render_points_as_spheres=True, pickable=False,
+                                                      reset_camera=False))
 
     def _build_mesh(self):
         m = self.g.mesh

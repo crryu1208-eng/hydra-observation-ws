@@ -9,6 +9,7 @@ import json
 import os
 import pathlib
 import sys
+import time
 
 if os.environ.get("WAYLAND_DISPLAY") and "QT_QPA_PLATFORM" not in os.environ:
     os.environ["QT_QPA_PLATFORM"] = "xcb"  # VTK renders through X11; use XWayland on Wayland sessions
@@ -21,6 +22,31 @@ from qtpy import QtCore, QtGui, QtWidgets  # noqa: E402
 from . import model  # noqa: E402
 from .camera import CameraPanel  # noqa: E402
 from .scene import DEFAULT_STYLE, GROUP_STYLE, SceneView, label_color  # noqa: E402
+
+LC_LOG = "logs/bridge.jsonl"  # loop closures fed to Hydra (realtime/rtabmap_hydra_bridge.py)
+LC_HIGHLIGHT_S = 6.0  # new loop closures stay highlighted (red line + banner) this long
+
+
+def session_root(path) -> pathlib.Path | None:
+    """The session folder above a scene graph file (the one with logs/bridge.jsonl), if any."""
+    p = pathlib.Path(path).expanduser().resolve()
+    for d in [p, *p.parents][:6]:
+        if (d / LC_LOG).is_file():
+            return d
+    return None
+
+
+def read_closures(lines) -> list[dict]:
+    out = []
+    for line in lines:
+        try:
+            d = json.loads(line)
+        except ValueError:
+            continue
+        if d.get("event") == "closure":
+            out.append(d)
+    return out
+
 
 ID_ROLE = QtCore.Qt.UserRole
 GROUP_ROLE = QtCore.Qt.UserRole + 1
@@ -234,7 +260,19 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.plotter = QtInteractor(self)
         self.plotter.set_background("#f4f6f7", top="#dfe5ea")
-        self.setCentralWidget(self.plotter)
+        # live loop closure banner: a Qt label above the 3D view (VTK text scales with the window)
+        self.lc_banner = QtWidgets.QLabel()
+        self.lc_banner.setAlignment(QtCore.Qt.AlignCenter)
+        self.lc_banner.setStyleSheet("background:#e63320; color:white; font-size:18px; font-weight:bold; "
+                                     "padding:8px;")
+        self.lc_banner.hide()
+        center = QtWidgets.QWidget()
+        cl = QtWidgets.QVBoxLayout(center)
+        cl.setContentsMargins(0, 0, 0, 0)
+        cl.setSpacing(0)
+        cl.addWidget(self.lc_banner)
+        cl.addWidget(self.plotter, 1)
+        self.setCentralWidget(center)
         self.scene = SceneView(self.plotter)
         self.plotter.add_axes()
 
@@ -353,6 +391,8 @@ class MainWindow(QtWidgets.QMainWindow):
             ("frame_path", "Frame path", False, "Camera path of every recorded frame (observations)"),
             ("boxes", "Boxes", True, "Object bounding boxes"),
             ("object_labels", "Labels", False, "Object class labels"),
+            ("closures", "Loop closures", True, "Loop closures (RTAB-Map, logs/bridge.jsonl): lines between the "
+             "two trajectory points they connect; live, a new one is announced and shown in red"),
         ]:
             a = tb.addAction(text)
             a.setCheckable(True)
@@ -388,6 +428,9 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         self.graph = g
         self.scene.opt.hidden_groups = frozenset()
+        root = session_root(g.path)
+        lcs = read_closures(open(root / LC_LOG)) if root else []
+        self.scene.closures = [(d["from_stamp_ns"], d["to_stamp_ns"], False) for d in lcs]
         self.scene.set_graph(g)
         self._fill_tree()
         self.inspector.show_node(g, None)
@@ -397,8 +440,9 @@ class MainWindow(QtWidgets.QMainWindow):
         mesh = f", mesh {len(g.mesh.points):,} vertices" if g.mesh is not None else ", no mesh"
         obs = (f", {len(g.observations.frames):,} recorded frames (click the trajectory to see RGB / depth)"
                if g.observations else "")
+        lc = f", {len(lcs)} loop closures" if lcs else ""
         self.setWindowTitle(f"DSG Viewer — {g.path}")
-        self.statusBar().showMessage(f"{counts}; {len(g.edges)} edges{mesh}{obs}")
+        self.statusBar().showMessage(f"{counts}; {len(g.edges)} edges{mesh}{obs}{lc}")
 
     # ---- live mode --------------------------------------------------------------------------
     def open_live_dialog(self):
@@ -413,6 +457,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.live_path = model.live_path(path)
         self._live_mtime = None
         self._live_future = None
+        # <session>/hydra/live/dsg.json -> <session>/logs/bridge.jsonl
+        self._lc_path = self.live_path.parents[2] / LC_LOG
+        self._lc_pos = 0
+        self._lc_rest = ""
+        self._lc_count = 0
+        self._lc_first = True  # closures already in the log when the viewer starts: no announcement
+        self._lc_until = 0.0
+        self.scene.closures = []
         if not hasattr(self, "_live_pool"):
             self._live_pool = concurrent.futures.ThreadPoolExecutor(1)  # parse off the UI thread
             self._live_timer = QtCore.QTimer(self)
@@ -421,18 +473,24 @@ class MainWindow(QtWidgets.QMainWindow):
             self.follow = QtWidgets.QCheckBox("Follow camera")
             self.follow.setChecked(True)
             self.follow.setToolTip("Live: show the newest recorded frame (RGB / depth and its camera pose)")
+            self.addToolBarBreak()  # its own row: the loop closure counter must not fold away
             self.live_tb = self.addToolBar("Live")
             self.live_tb.setObjectName("live")
             self.live_label = QtWidgets.QLabel()
             self.live_tb.addWidget(self.live_label)
             self.live_tb.addWidget(self.follow)
+            self.lc_label = QtWidgets.QLabel()
+            self.lc_label.setToolTip("Loop closures received so far (logs/bridge.jsonl)")
+            self.live_tb.addWidget(self.lc_label)
             self.follow.toggled.connect(lambda on: on and self._follow_latest())
         self.live_tb.show()
+        self._set_lc_label(False)
         self._live_timer.start()
         self.live_label.setText(" ● LIVE waiting ")
         self.statusBar().showMessage(f"Live: waiting for {self.live_path}")
 
     def _live_tick(self):
+        self._poll_closures()
         if self._live_future is not None:
             if not self._live_future.done():
                 return
@@ -489,6 +547,67 @@ class MainWindow(QtWidgets.QMainWindow):
         self.setWindowTitle(f"DSG Viewer — LIVE {g.path}")
         self.live_label.setText(f" ● LIVE {QtCore.QTime.currentTime().toString('HH:mm:ss')} ")
         self.statusBar().showMessage(f"Live: {counts}{mesh}, {nf:,} recorded frames")
+
+    # ---- loop closure notifications (live) -----------------------------------------------------
+    def _poll_closures(self):
+        try:
+            size = self._lc_path.stat().st_size
+        except FileNotFoundError:
+            return
+        if size < self._lc_pos:  # a new session wrote a new log
+            self._lc_pos, self._lc_rest, self._lc_count = 0, "", 0
+            self.scene.closures = []
+        if size == self._lc_pos:
+            if self._lc_until and time.monotonic() > self._lc_until:
+                self._end_highlight()
+            return
+        with open(self._lc_path) as f:
+            f.seek(self._lc_pos)
+            text = self._lc_rest + f.read()
+            self._lc_pos = f.tell()
+        lines = text.split("\n")
+        self._lc_rest = lines.pop()  # an unfinished last line waits for the next poll
+        new = read_closures(lines)
+        first, self._lc_first = self._lc_first, False
+        if not new:
+            return
+        self._lc_count += len(new)
+        if first:  # the viewer started late: show them, announce nothing
+            self.scene.closures += [(d["from_stamp_ns"], d["to_stamp_ns"], False) for d in new]
+            self.scene.update_closures()
+            self._set_lc_label(False)
+            return
+        self.scene.closures = [(f, t, False) for f, t, _ in self.scene.closures]
+        self.scene.closures += [(d["from_stamp_ns"], d["to_stamp_ns"], True) for d in new]
+        self.scene.update_closures()
+        self._announce(new)
+
+    def _announce(self, new: list[dict]):
+        last = new[-1]
+        n0 = self._lc_count - len(new) + 1
+        num = f"#{self._lc_count}" if len(new) == 1 else f"#{n0}-#{self._lc_count}"
+        corr_m = max(d.get("correction_m", 0.0) for d in new)
+        corr_deg = max(d.get("correction_deg", 0.0) for d in new)
+        dt = abs(last.get("dt_s", 0.0))
+        text = (f"⟲  LOOP CLOSURE {num}   —   back to where the camera was {dt:.0f} s ago   —   "
+                f"correction {corr_m:.2f} m / {corr_deg:.1f}°")
+        self.lc_banner.setText(text)
+        self.lc_banner.show()
+        self._lc_until = time.monotonic() + LC_HIGHLIGHT_S
+        self._set_lc_label(True)
+        self.statusBar().showMessage(f"Loop closure {num}: {text.split('   ', 1)[1]}", int(LC_HIGHLIGHT_S * 1000))
+
+    def _end_highlight(self):
+        self._lc_until = 0.0
+        self.lc_banner.hide()
+        self.scene.closures = [(f, t, False) for f, t, _ in self.scene.closures]
+        self.scene.update_closures()
+        self._set_lc_label(False)
+
+    def _set_lc_label(self, hot: bool):
+        self.lc_label.setText(f"  ⟲ Loop closures {self._lc_count}  ")
+        self.lc_label.setStyleSheet("background:#e63320; color:white; font-weight:bold; border-radius:4px;"
+                                    if hot else "")
 
     def _follow_latest(self):
         obs = self.graph.observations if self.graph else None
