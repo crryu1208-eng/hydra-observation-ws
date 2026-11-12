@@ -39,6 +39,8 @@ CAM = "/camera/camera/"
 IMU = CAM + "imu"
 DEPTH = CAM + "aligned_depth_to_color/image_raw"
 INFO = CAM + "color/camera_info"
+SEM = CAM + "semantic/image_raw"  # segmentation labels (labelspace ids), same size as the depth
+FLOOR_LABELS = (3, 28)  # ade20k_full floor, rug (as realtime/gravity_odom.py)
 BASE = "camera_link"
 
 
@@ -103,7 +105,20 @@ def up_in_base(accels, imu_frame, tf):
 MIN_BELOW = 0.6
 
 
-def floor_height(depth_mm, info_k, depth_frame, R_level, tf):
+def labels_array(m):
+    """Label image (sensor_msgs/Image) as a 2D integer array, or None."""
+    dt = {"8UC1": np.uint8, "mono8": np.uint8, "16UC1": np.uint16, "mono16": np.uint16,
+          "16SC1": np.int16, "32SC1": np.int32}.get(m.encoding)
+    if dt is None:
+        return None
+    a = np.frombuffer(bytes(m.data), dt)
+    return a.reshape(m.height, m.step // np.dtype(dt).itemsize)[:, :m.width]
+
+
+def floor_height(depth_mm, info_k, depth_frame, R_level, tf, labels=None):
+    """Height of the floor below the camera, or None, and a message. With labels (same size as
+    the depth) only floor / rug pixels count: then a floor seen at a shallow angle behind desks
+    is enough (by height alone a desk top took its place, floortest: 0.74 m for ~1.0 m)."""
     T = tf.lookup(depth_frame)
     if T is None:
         raise RuntimeError(f"no static transform {BASE} -> {depth_frame}")
@@ -111,12 +126,27 @@ def floor_height(depth_mm, info_k, depth_frame, R_level, tf):
     d = depth_mm[::4, ::4].astype(np.float64) / 1000.0
     v, u = np.mgrid[0:depth_mm.shape[0]:4, 0:depth_mm.shape[1]:4]
     ok = (d > 0.2) & (d < 5.0)
+    n_all = int(ok.sum())
+    if labels is not None:
+        ok &= np.isin(labels[::4, ::4], FLOOR_LABELS)
+        if ok.sum() < 300:
+            return None, f"only {ok.sum()} floor-labelled depth pixels"
     d, u, v = d[ok], u[ok], v[ok]
-    if len(d) < 1000:
+    if labels is None and len(d) < 1000:
         return None, "too few depth pixels"
     p = np.stack([(u - cx) * d / fx, (v - cy) * d / fy, d], 1)
     z = (p @ (R_level @ T[0]).T)[:, 2] + (R_level @ T[1])[2]
     cand = z[(z > -2.5) & (z < -MIN_BELOW)]
+    if labels is not None:  # floor pixels only: the lowest dense layer among them
+        if len(cand) < 200:
+            return None, f"floor-labelled pixels not {MIN_BELOW}-2.5 m below the camera"
+        hist, edges = np.histogram(cand, bins=np.arange(-2.5, -MIN_BELOW + 1e-9, 0.02))
+        dense = np.nonzero((hist >= 0.3 * hist.max()) & (hist >= 50))[0]
+        lo = edges[dense[0]]
+        layer = cand[(cand > lo - 0.04) & (cand < lo + 0.06)]
+        h = -float(np.median(layer))
+        return h, (f"floor {h:.3f} m below the camera ({100 * len(layer) / n_all:.0f}% of the depth "
+                   "points, floor-labelled)")
     if len(cand) < 0.015 * len(z):
         return None, (f"only {100 * len(cand) / len(z):.1f}% of the depth points are "
                       f"{MIN_BELOW}-2.5 m below the camera")
@@ -185,6 +215,8 @@ class Live:
         self.node.create_subscription(Imu, IMU, self.on_imu, QoSProfile(depth=400, reliability=ReliabilityPolicy.BEST_EFFORT))
         self.node.create_subscription(CameraInfo, INFO, self.on_info, rel)
         self.node.create_subscription(Image, DEPTH, self.on_depth, rel)
+        self.sem = {}  # stamp -> label image (segmentation may not run yet)
+        self.node.create_subscription(Image, SEM, self.on_sem, QoSProfile(depth=10))
         if check:
             from nav_msgs.msg import Odometry
             self.node.create_subscription(Odometry, odom_topic, self.on_odom, rel)
@@ -195,6 +227,20 @@ class Live:
 
     def on_info(self, m):
         self.info = m
+
+    def on_sem(self, m):
+        self.sem[(m.header.stamp.sec, m.header.stamp.nanosec)] = m
+        while len(self.sem) > 30:
+            self.sem.pop(next(iter(self.sem)))
+
+    def labels_for(self, m, timeout=1.0):
+        """Labels of this depth image (same stamp), if the segmentation runs, else None."""
+        key = (m.header.stamp.sec, m.header.stamp.nanosec)
+        if not self.sem:
+            return None
+        self.spin(lambda: key in self.sem, timeout)
+        s = self.sem.get(key)
+        return labels_array(s) if s is not None and (s.height, s.width) == (m.height, m.width) else None
 
     def on_depth(self, m):
         if self.want_depth and self.depth is None:
@@ -223,11 +269,15 @@ def main():
     ap.add_argument("--default-height", type=float, default=0.0)
     ap.add_argument("--max-jitter", type=float, default=0.3, help="m/s^2, larger: camera moving")
     ap.add_argument("--attempts", type=int, default=10)
+    # live: without the floor in view, measure again (and tell the user to tilt the camera down)
+    # for up to this long before falling back to --default-height
+    ap.add_argument("--floor-wait", type=float, default=15.0)
     # --check: rgbd_odometry's own output; /rtabmap/odom (gravity_odom) is held while floor_auto
     # waits for the floor
     ap.add_argument("--odom-topic", default="/rtabmap/odom")
     args = ap.parse_args()
 
+    labels = None
     if args.bag:
         tf, acc, imu_frame, info, depth = from_bag(args)
     else:
@@ -249,17 +299,32 @@ def main():
             log(f"map level check: odometry z axis vs gravity {err:.1f} deg "
                 f"({'ok' if ok else 'NOT LEVEL'}; accelerometer jitter {jitter:.2f} m/s^2)")
             return 0 if ok else 1
-        for attempt in range(args.attempts):
+        give_up = time.time() + args.floor_wait
+        moving = 0
+        while True:
             live.acc.clear(); live.depth = None; live.want_depth = False
             live.spin(lambda: False, args.duration / 2)
             live.want_depth = True
             live.spin(lambda: False, args.duration / 2)
             live.spin(lambda: live.depth is not None, args.timeout)
-            if live.acc and up_in_base(live.acc, live.imu_frame, live.tf)[1] <= args.max_jitter:
+            if not live.acc or up_in_base(live.acc, live.imu_frame, live.tf)[1] > args.max_jitter:
+                moving += 1
+                if moving >= args.attempts:
+                    return 1
+                log("the camera is moving, measuring again (hold it still)")
+                continue
+            if live.depth is None or live.info is None:
                 break
-            log("the camera is moving, measuring again (hold it still)")
-        else:
-            return 1
+            up = up_in_base(live.acc, live.imu_frame, live.tf)[0]
+            d = np.frombuffer(bytes(live.depth.data), dtype=np.uint16).reshape(live.depth.height, live.depth.width)
+            labels = live.labels_for(live.depth)
+            h, why = floor_height(d, list(live.info.k), live.depth.header.frame_id, level_rotation(up)[0],
+                                  live.tf, labels)
+            left = give_up - time.time()
+            if h is not None or left <= 0:
+                break
+            log(f">>> NO FLOOR IN VIEW ({why}): tilt the camera ~40 deg down, to the floor about 1 m "
+                f"ahead, and hold it still ({left:.0f} s left)")
         tf, acc, imu_frame, info, depth = live.tf, live.acc, live.imu_frame, live.info, live.depth
 
     if not acc or depth is None or info is None:
@@ -268,7 +333,7 @@ def main():
     up, jitter, g = up_in_base(acc, imu_frame, tf)
     R_level, _, _ = level_rotation(up)
     d = np.frombuffer(bytes(depth.data), dtype=np.uint16).reshape(depth.height, depth.width)
-    h, msg = floor_height(d, list(info.k), depth.header.frame_id, R_level, tf)
+    h, msg = floor_height(d, list(info.k), depth.header.frame_id, R_level, tf, labels)
     if h is None:
         h = args.default_height
         msg += f"; camera height {h:.2f} m used"

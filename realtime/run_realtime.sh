@@ -118,7 +118,7 @@ LAUNCH_PID=; ODOM_PID=
 echo "session $OUT (${W}x${H} @ $FPS fps)"
 echo "=== Before RECORDING appears (about 12 s): ==="
 echo "===   1. hold the camera still                                                          ==="
-echo "===   2. point it at the floor (1-2 m away, more than 0.6 m below the camera): the floor  ==="
+echo "===   2. tilt it ~40 deg down to the floor about 1 m ahead (not a desk top): the floor   ==="
 echo "===      height becomes z = 0; without a floor in view mapping waits until one is seen  ==="
 echo "===   3. keep a textured scene in view (no blank wall) so odometry starts tracking       ==="
 
@@ -193,7 +193,7 @@ LAUNCH_PID=$!; PIDS+=($LAUNCH_PID); stamp "mapping launched"
 
 # let auto exposure settle so odometry does not initialize on a bad first frame
 sleep 3
-echo "measuring the floor height (hold the camera still, the floor in view)"
+echo "measuring the floor height: hold the camera still, tilted ~40 deg down to the floor about 1 m ahead"
 POSE=$(python3 $RT/floor_init.py --default-height "$CAM_HEIGHT" 2> >(tee "$RUN_LOGS/floor_init.log" >&2)) \
   || { echo "could not measure the start pose, see $RUN_LOGS/floor_init.log"; exit 1; }
 echo "odometry start pose (x y z roll pitch yaw): $POSE"; stamp "floor measured"
@@ -225,6 +225,11 @@ stamp "recording"
 echo "=== RECORDING (startup $(tail -1 "$RUN_LOGS/startup.log" | awk '{print $1}') s). Move the camera slowly; avoid blank walls and fast turns. ==="
 $live && echo "=== Live map on the host: tools/dsg_viewer/run.sh --live ~/hydra_data/realtime/$NAME ==="
 echo "=== Press Enter (or Ctrl-C) to stop. ==="
+if $floor_auto; then
+  echo "=== NO FLOOR SEEN AT THE START: the map and the viewer stay EMPTY until the camera sees  ==="
+  echo "=== the floor. Tilt it down to the floor ~1 m ahead now (after 30 s it starts anyway with ==="
+  echo "=== an assumed camera height of 1.3 m).                                                  ==="
+fi
 trap 'echo' INT
 if [ -n "$STOP_AFTER" ]; then sleep "$STOP_AFTER" || true; else read -r || true; fi
 # shutting down must not be interrupted: a second Ctrl-C would kill Hydra before it saves
