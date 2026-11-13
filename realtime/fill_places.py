@@ -8,7 +8,7 @@ added from what was recorded:
   trajectory  - the camera was carried there, so there is walkable floor: along the agent node path
                 (every 0.3 m), a place wherever no place is within --gap (0.55 m)
   floor mesh  - mesh vertices labelled floor / rug (0.8 m cells with enough of them) with no place
-                within 0.9 m
+                within 0.9 m and nothing standing on them (no other vertex 0.15-1.0 m above within 0.4 m)
 New places sit on the floor (median z of the floor vertices around them, or of the nearest places
 when there are few or they are > 0.3 m off),
 carry metadata {"filled_from": "trajectory" | "floor_mesh"} and the floor vertices within 0.4 m as
@@ -43,6 +43,8 @@ T = np.array([n["attributes"]["position"] for n in agents])
 # the walked path, every 0.15 m (for the "walked along" edge test)
 path = [T[0, :2]]
 for p, q in zip(T[:-1, :2], T[1:, :2]):
+    if np.linalg.norm(q - p) > 1.5:  # not walked (e.g. between merged sessions): no path in between
+        path.append(q); continue
     k = max(1, int(np.linalg.norm(q - p) / 0.15))
     path += [p + (q - p) * t for t in np.linspace(0, 1, k + 1)[1:]]
 path = np.array(path); ptree = cKDTree(path)
@@ -82,11 +84,17 @@ ij = np.floor(F[:, :2] / cell).astype(int)
 cells = {}
 for k, c in enumerate(map(tuple, ij)):
     cells.setdefault(c, []).append(k)
+otree = cKDTree(V[:, :2])
+def clear(p, fz):
+    """nothing stands on the floor there: no other vertex 0.15 .. 1.0 m above it within 0.4 m"""
+    i = otree.query_ball_point(p, 0.4)
+    h = V[i, 2] - fz
+    return not ((h > 0.15) & (h < 1.0) & ~np.isin(L[i], FLOOR)).any()
 for c, ks in cells.items():
     if len(ks) < 40:
         continue
     p = np.median(F[ks, :2], 0)
-    if np.min(np.linalg.norm(np.array(xy) - p, axis=1)) > 0.9:
+    if np.min(np.linalg.norm(np.array(xy) - p, axis=1)) > 0.9 and clear(p, floor_z(p)):
         add(p, "floor_mesh")
 
 # node ids after the last place 2D id (same symbol)
