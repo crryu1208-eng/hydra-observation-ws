@@ -8,7 +8,7 @@
 # Output: /root/data/realtime/<session>/{bag,observations,hydra,rtabmap,logs}
 # Press Enter (or Ctrl-C) to stop. Env: FPS (default 15), RES (color and depth size, default
 # 1280x720, the D435i depth maximum; 640x480 for the earlier sessions), VIS=1 starts the Hydra visualizer,
-# CAM_NICE (camera driver nice value, default -10), CAM_HEIGHT (camera height when the floor is not in view at the start, default 0), FLOOR_LOCK=0 (no floor height lock, for sessions that change floors), CAM_CPUS / PIPE_CPUS (CPU pinning, PIN=0 off), STOP_AFTER=<s> stops automatically (non-interactive runs), RECORD_IR=1 IR_EMITTER=on|off|onoff records the IR stereo pair, REBUILD=0 skips rebuilding the map with the loop-closed poses after recording (<session>/rebuilt, about the session's length), LIVE=0 turns off the live scene graph
+# CAM_NICE (camera driver nice value, default -10), CAM_HEIGHT (camera height when the floor is not in view at the start, default 0), FLOOR_LOCK=0 (no floor height lock, for sessions that change floors), CAM_CPUS / PIPE_CPUS (CPU pinning, PIN=0 off), STOP_AFTER=<s> stops automatically (non-interactive runs), RECORD_IR=1 IR_EMITTER=on|off|onoff records the IR stereo pair (RES default then 848x480), REBUILD=0 skips rebuilding the map with the loop-closed poses after recording (<session>/rebuilt, about the session's length), LIVE=0 turns off the live scene graph
 # files for the DSG viewer (<session>/hydra/live; on the host:
 #   tools/dsg_viewer/run.sh --live ~/hydra_data/realtime/<session>).
 #
@@ -29,7 +29,11 @@ set -m
 # background job below takes stdin from /dev/null
 NAME="${1:-$(date +%Y%m%d_%H%M%S)}"
 FPS="${FPS:-15}"
-RES="${RES:-1280x720}"
+RECORD_IR="${RECORD_IR:-0}"
+# with the IR stereo pair 1280x720 was too much (library_test: odometry 8.2 Hz, recorded 7.4 fps,
+# no odom_raw in the bag); 848x480 (Intel's recommended D435 depth size): odometry 14.8 Hz
+RES_DEFAULT=1280x720; [ "$RECORD_IR" = 1 ] && RES_DEFAULT=848x480
+RES="${RES:-$RES_DEFAULT}"
 W="${RES%x*}"; H="${RES#*x}"
 # RTAB-Map odometry detects features on a decimated image so its cost stays at the 640-wide level
 ODOM_DECIMATION=1; [ "$W" -ge 1280 ] && ODOM_DECIMATION=2
@@ -38,7 +42,6 @@ REBUILD="${REBUILD:-1}"
 # IR stereo for visual-inertial odometry tests: RECORD_IR=1 records infra1 / infra2 (same size and
 # rate as depth); IR_EMITTER on (default, the projector dots are in the IR images), off (clean IR,
 # weaker depth on blank surfaces) or onoff (projector every other frame)
-RECORD_IR="${RECORD_IR:-0}"
 IR_EMITTER="${IR_EMITTER:-on}"
 LIVE="${LIVE:-1}"
 # camera driver priority: realsense2_camera aligns depth to color on the CPU; on office_rt3 its
@@ -275,6 +278,7 @@ python3 $WS/src/hydra/scripts/map_observations.py "$OBS" "$LOG_PATH" --max-ancho
   --max-anchor-angle-deg 180 \
   > "$RUN_LOGS/map_observations.log" 2>&1 || echo "map_observations failed, see $RUN_LOGS"
 python3 $WS/src/hydra-realtime/scripts/verify_d435i.py "$OUT" | tee "$RUN_LOGS/verify.log" || true
+python3 $RT/session_check.py "$OUT" 2>&1 | tee "$RUN_LOGS/session_check.log" || true
 # the map again with the loop-closed per-frame poses (<session>/rebuilt): mesh, objects and places
 # then agree with the poses the frames carry (the live backend mesh is deformed only approximately)
 if [ "$REBUILD" = 1 ]; then
