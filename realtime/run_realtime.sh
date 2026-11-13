@@ -8,7 +8,7 @@
 # Output: /root/data/realtime/<session>/{bag,observations,hydra,rtabmap,logs}
 # Press Enter (or Ctrl-C) to stop. Env: FPS (default 15), RES (color and depth size, default
 # 1280x720, the D435i depth maximum; 640x480 for the earlier sessions), VIS=1 starts the Hydra visualizer,
-# CAM_NICE (camera driver nice value, default -10), CAM_HEIGHT (camera height when the floor is not in view at the start, default 0), FLOOR_LOCK=0 (no floor height lock, for sessions that change floors), CAM_CPUS / PIPE_CPUS (CPU pinning, PIN=0 off), STOP_AFTER=<s> stops automatically (non-interactive runs), RECORD_IR=1 IR_EMITTER=on|off|onoff records the IR stereo pair (RES default then 848x480), RGB_EXPOSURE (0.1 ms units, default 83 = 1/120 s; auto) and RGB_GAIN (default 50), REBUILD=0 skips rebuilding the map with the loop-closed poses after recording (<session>/rebuilt, about the session's length), LIVE=0 turns off the live scene graph
+# CAM_NICE (camera driver nice value, default -10), CAM_HEIGHT (camera height when the floor is not in view at the start, default 0), FLOOR_LOCK=0 (no floor height lock, for sessions that change floors), CAM_CPUS / PIPE_CPUS (CPU pinning, PIN=0 off), STOP_AFTER=<s> stops automatically (non-interactive runs), RECORD_IR=1 IR_EMITTER=on|off|onoff records the IR stereo pair (RES default then 848x480), RGB_EXPOSURE (default auto; or 0.1 ms units, e.g. 83 = 1/120 s) and RGB_GAIN (default 50), REBUILD=0 skips rebuilding the map with the loop-closed poses after recording (<session>/rebuilt, about the session's length), LIVE=0 turns off the live scene graph
 # files for the DSG viewer (<session>/hydra/live; on the host:
 #   tools/dsg_viewer/run.sh --live ~/hydra_data/realtime/<session>).
 #
@@ -46,8 +46,9 @@ IR_EMITTER="${IR_EMITTER:-on}"
 # color camera exposure: RGB_EXPOSURE in the camera's units (0.1 ms) with RGB_GAIN, or
 # RGB_EXPOSURE=auto (driver default). 83 = 8.3 ms = 1/120 s: no banding under 60 Hz lights (the
 # anti-flicker setting only works with auto exposure), motion blur ~1 px at 0.2 rad/s and ~2 px at
-# 0.4 rad/s (848x480, f 607 px); auto exposure took ~10-30 ms indoors
-RGB_EXPOSURE="${RGB_EXPOSURE:-83}"
+# 0.4 rad/s (848x480, f 607 px); auto exposure took ~10-30 ms indoors. Default auto: lab sessions
+# with changing light levels
+RGB_EXPOSURE="${RGB_EXPOSURE:-auto}"
 RGB_GAIN="${RGB_GAIN:-50}"
 LIVE="${LIVE:-1}"
 # camera driver priority: realsense2_camera aligns depth to color on the CPU; on office_rt3 its
@@ -165,8 +166,12 @@ case "$IR_EMITTER" in
   onoff) emitter_steps=("depth_module.emitter_enabled 1" "depth_module.emitter_on_off true") ;;
   *) echo "IR_EMITTER must be on, off or onoff"; exit 1 ;;
 esac
-[ "$RGB_EXPOSURE" != auto ] && emitter_steps+=("rgb_camera.enable_auto_exposure false"
-                                                "rgb_camera.exposure $RGB_EXPOSURE" "rgb_camera.gain $RGB_GAIN")
+# the exposure mode also stays on the camera (e.g. manual from the RealSense Viewer): set it too
+if [ "$RGB_EXPOSURE" = auto ]; then
+  emitter_steps+=("rgb_camera.enable_auto_exposure true")
+else
+  emitter_steps+=("rgb_camera.enable_auto_exposure false" "rgb_camera.exposure $RGB_EXPOSURE" "rgb_camera.gain $RGB_GAIN")
+fi
 set_emitter() {
   local step ok
   for step in "${emitter_steps[@]}"; do
