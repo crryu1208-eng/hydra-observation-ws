@@ -146,24 +146,34 @@ wait_log() {  # wait_log <file> <pattern> <timeout_s>
 
 wait_log "$RUN_LOGS/camera.log" "RealSense Node Is Up" 60
 echo "camera up"; stamp "camera up"
-if [ "$RECORD_IR" = 1 ]; then
-  case "$IR_EMITTER" in
-    off) ir_param=(depth_module.emitter_enabled 0) ;;
-    onoff) ir_param=(depth_module.emitter_on_off true) ;;
-    on) ir_param=() ;;
-    *) echo "IR_EMITTER must be on, off or onoff"; exit 1 ;;
-  esac
-  if [ ${#ir_param[@]} -gt 0 ]; then
+# the IR projector state stays on the camera across restarts (an IR_EMITTER=off session left it
+# off, and the next "on" session and an "onoff" one, refused while the projector is off, recorded
+# without it): set it every time, in the background, done before the floor is measured
+case "$IR_EMITTER" in
+  on) emitter_steps=("depth_module.emitter_enabled 1" "depth_module.emitter_on_off false") ;;
+  off) emitter_steps=("depth_module.emitter_on_off false" "depth_module.emitter_enabled 0") ;;
+  onoff) emitter_steps=("depth_module.emitter_enabled 1" "depth_module.emitter_on_off true") ;;
+  *) echo "IR_EMITTER must be on, off or onoff"; exit 1 ;;
+esac
+set_emitter() {
+  local step ok
+  for step in "${emitter_steps[@]}"; do
+    ok=false
     # the camera node is up before ROS discovery finds it: retry for up to ~10 s
     for i in $(seq 1 10); do
-      ros2 param set /camera/camera "${ir_param[@]}" >> "$RUN_LOGS/ir_emitter.log" 2>&1 && break
+      ros2 param set /camera/camera $step >> "$RUN_LOGS/ir_emitter.log" 2>&1 \
+        && tail -1 "$RUN_LOGS/ir_emitter.log" | grep -q "successful" && { ok=true; break; }
       sleep 1
     done
-    grep -q "^Set parameter successful" "$RUN_LOGS/ir_emitter.log" \
-      || { echo "could not set the IR emitter, see $RUN_LOGS/ir_emitter.log"; exit 1; }
-  fi
-  echo "IR stereo recorded, emitter $IR_EMITTER"
-fi
+    $ok || { echo "FAILED: $step" >> "$RUN_LOGS/ir_emitter.log"; return 1; }
+  done
+  for p in depth_module.emitter_enabled depth_module.emitter_on_off; do
+    echo "$p: $(ros2 param get /camera/camera $p 2>&1)" >> "$RUN_LOGS/ir_emitter.log"
+  done
+}
+set_emitter < /dev/null &
+EMITTER_PID=$!
+[ "$RECORD_IR" = 1 ] && echo "IR stereo recorded, emitter $IR_EMITTER"
 IR_TOPICS=()
 [ "$RECORD_IR" = 1 ] && IR_TOPICS=($CAM/infra1/image_rect_raw $CAM/infra1/camera_info
                                    $CAM/infra2/image_rect_raw $CAM/infra2/camera_info)
@@ -193,6 +203,7 @@ LAUNCH_PID=$!; PIDS+=($LAUNCH_PID); stamp "mapping launched"
 
 # let auto exposure settle so odometry does not initialize on a bad first frame
 sleep 3
+wait $EMITTER_PID || { echo "could not set the IR projector ($IR_EMITTER), see $RUN_LOGS/ir_emitter.log"; exit 1; }
 echo "measuring the floor height: hold the camera still, tilted ~40 deg down to the floor about 1 m ahead"
 POSE=$(python3 $RT/floor_init.py --default-height "$CAM_HEIGHT" 2> >(tee "$RUN_LOGS/floor_init.log" >&2)) \
   || { echo "could not measure the start pose, see $RUN_LOGS/floor_init.log"; exit 1; }
