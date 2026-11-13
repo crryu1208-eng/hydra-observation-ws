@@ -296,4 +296,25 @@ def load(path: str | pathlib.Path) -> SceneGraph:
     root = find_session_root(path)
     if root is not None:
         g.observations = load_observations(root / "observations")
+    if g.observations is not None:
+        frames_by_time(g)
     return g
+
+
+def frames_by_time(g: SceneGraph):
+    """Agent nodes without frames in agent_frames.json (written only after recording, so none while
+    live): give each frame to the agent node nearest in time, like agent_frames.json."""
+    obs = g.observations
+    agents = sorted(((int(n.attrs["timestamp"]), n.id) for n in g.nodes.values()
+                     if n.type == "AgentNodeAttributes" and "timestamp" in n.attrs))
+    if not agents or not obs.ordered or all(obs.node_frames.get(i) for _, i in agents):
+        return
+    t = np.array([a for a, _ in agents], dtype=np.int64)
+    stamps = np.array([obs.frames[f].timestamp_ns for f in obs.ordered], dtype=np.int64)
+    # frames after the midpoint between two nodes belong to the later node
+    owner = np.searchsorted(t[:-1] + (t[1:] - t[:-1]) // 2, stamps, side="right")
+    for k, (_, nid) in enumerate(agents):
+        if not obs.node_frames.get(nid):
+            ids = [obs.ordered[i] for i in np.flatnonzero(owner == k)]
+            if ids:
+                obs.node_frames[nid] = ids

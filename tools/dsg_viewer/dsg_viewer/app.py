@@ -506,6 +506,12 @@ class MainWindow(QtWidgets.QMainWindow):
             mtime = self.live_path.stat().st_mtime_ns
         except FileNotFoundError:
             return
+        # also reload when frames.jsonl / agent_frames.json (keyframe -> frames) appear: they are
+        # written after the recording stops, after the last scene graph (frames_raw.jsonl, written
+        # all along, is read with each scene graph)
+        obs = self.live_path.parents[2] / "observations"
+        mtime = (mtime, *((obs / n).stat().st_mtime_ns if (obs / n).exists() else None
+                          for n in ("agent_frames.json", "frames.jsonl")))
         if mtime != self._live_mtime:
             self._live_mtime = mtime
             self._live_future = self._live_pool.submit(model.load, self.live_path)
