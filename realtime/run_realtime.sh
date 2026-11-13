@@ -195,9 +195,10 @@ EMITTER_PID=$!
 IR_TOPICS=()
 [ "$RECORD_IR" = 1 ] && IR_TOPICS=($CAM/infra1/image_rect_raw $CAM/infra1/camera_info
                                    $CAM/infra2/image_rect_raw $CAM/infra2/camera_info)
-# record before Hydra is ready so the bag contains every frame Hydra sees
+# record before Hydra is ready so the bag contains every frame Hydra sees; color/metadata holds
+# each frame's actual exposure and gain (JSON)
 ros2 bag record -s sqlite3 --disable-keyboard-controls -o "$BAG" \
-  $CAM/color/image_raw $CAM/color/camera_info \
+  $CAM/color/image_raw $CAM/color/camera_info $CAM/color/metadata \
   $CAM/aligned_depth_to_color/image_raw $CAM/aligned_depth_to_color/camera_info \
   $CAM/imu /tf /tf_static /rtabmap/odom /rtabmap/odom_raw /rtabmap/odom_info "${IR_TOPICS[@]}" \
   < /dev/null > "$RUN_LOGS/bag_record.log" 2>&1 &
