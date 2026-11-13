@@ -8,7 +8,7 @@
 # Output: /root/data/realtime/<session>/{bag,observations,hydra,rtabmap,logs}
 # Press Enter (or Ctrl-C) to stop. Env: FPS (default 15), RES (color and depth size, default
 # 1280x720, the D435i depth maximum; 640x480 for the earlier sessions), VIS=1 starts the Hydra visualizer,
-# CAM_NICE (camera driver nice value, default -10), CAM_HEIGHT (camera height when the floor is not in view at the start, default 0), FLOOR_LOCK=0 (no floor height lock, for sessions that change floors), CAM_CPUS / PIPE_CPUS (CPU pinning, PIN=0 off), STOP_AFTER=<s> stops automatically (non-interactive runs), RECORD_IR=1 IR_EMITTER=on|off|onoff records the IR stereo pair (RES default then 848x480), REBUILD=0 skips rebuilding the map with the loop-closed poses after recording (<session>/rebuilt, about the session's length), LIVE=0 turns off the live scene graph
+# CAM_NICE (camera driver nice value, default -10), CAM_HEIGHT (camera height when the floor is not in view at the start, default 0), FLOOR_LOCK=0 (no floor height lock, for sessions that change floors), CAM_CPUS / PIPE_CPUS (CPU pinning, PIN=0 off), STOP_AFTER=<s> stops automatically (non-interactive runs), RECORD_IR=1 IR_EMITTER=on|off|onoff records the IR stereo pair (RES default then 848x480), RGB_EXPOSURE (0.1 ms units, default 83 = 1/120 s; auto) and RGB_GAIN (default 50), REBUILD=0 skips rebuilding the map with the loop-closed poses after recording (<session>/rebuilt, about the session's length), LIVE=0 turns off the live scene graph
 # files for the DSG viewer (<session>/hydra/live; on the host:
 #   tools/dsg_viewer/run.sh --live ~/hydra_data/realtime/<session>).
 #
@@ -43,6 +43,12 @@ REBUILD="${REBUILD:-1}"
 # rate as depth); IR_EMITTER on (default, the projector dots are in the IR images), off (clean IR,
 # weaker depth on blank surfaces) or onoff (projector every other frame)
 IR_EMITTER="${IR_EMITTER:-on}"
+# color camera exposure: RGB_EXPOSURE in the camera's units (0.1 ms) with RGB_GAIN, or
+# RGB_EXPOSURE=auto (driver default). 83 = 8.3 ms = 1/120 s: no banding under 60 Hz lights (the
+# anti-flicker setting only works with auto exposure), motion blur ~1 px at 0.2 rad/s and ~2 px at
+# 0.4 rad/s (848x480, f 607 px); auto exposure took ~10-30 ms indoors
+RGB_EXPOSURE="${RGB_EXPOSURE:-83}"
+RGB_GAIN="${RGB_GAIN:-50}"
 LIVE="${LIVE:-1}"
 # camera driver priority: realsense2_camera aligns depth to color on the CPU; on office_rt3 its
 # aligned depth fell from 14 to 11.6 Hz once Hydra's load grew (+2 cores after loop closures),
@@ -113,6 +119,7 @@ cam_pin=(); [ "$PIN" = 1 ] && cam_pin=(taskset -c "$CAM_CPUS")
   rgb_camera.color_profile:=$W,$H,$FPS depth_module.depth_profile:=$W,$H,$FPS \
   align_depth.enable:=true enable_sync:=true \
   enable_gyro:=true enable_accel:=true unite_imu_method:=2 \
+  rgb_camera.enable_auto_exposure:=$( [ "$RGB_EXPOSURE" = auto ] && echo true || echo false ) \
   $( [ "$RECORD_IR" = 1 ] && echo enable_infra1:=true enable_infra2:=true depth_module.infra_profile:=$W,$H,$FPS ) \
   < /dev/null > "$RUN_LOGS/camera.log" 2>&1 &
 CAM_PID=$!; PIDS+=($CAM_PID)
@@ -158,6 +165,8 @@ case "$IR_EMITTER" in
   onoff) emitter_steps=("depth_module.emitter_enabled 1" "depth_module.emitter_on_off true") ;;
   *) echo "IR_EMITTER must be on, off or onoff"; exit 1 ;;
 esac
+[ "$RGB_EXPOSURE" != auto ] && emitter_steps+=("rgb_camera.enable_auto_exposure false"
+                                                "rgb_camera.exposure $RGB_EXPOSURE" "rgb_camera.gain $RGB_GAIN")
 set_emitter() {
   local step ok
   for step in "${emitter_steps[@]}"; do
@@ -170,7 +179,8 @@ set_emitter() {
     done
     $ok || { echo "FAILED: $step" >> "$RUN_LOGS/ir_emitter.log"; return 1; }
   done
-  for p in depth_module.emitter_enabled depth_module.emitter_on_off; do
+  for p in depth_module.emitter_enabled depth_module.emitter_on_off rgb_camera.enable_auto_exposure \
+           rgb_camera.exposure rgb_camera.gain; do
     echo "$p: $(ros2 param get /camera/camera $p 2>&1)" >> "$RUN_LOGS/ir_emitter.log"
   done
 }
@@ -206,7 +216,7 @@ LAUNCH_PID=$!; PIDS+=($LAUNCH_PID); stamp "mapping launched"
 
 # let auto exposure settle so odometry does not initialize on a bad first frame
 sleep 3
-wait $EMITTER_PID || { echo "could not set the IR projector ($IR_EMITTER), see $RUN_LOGS/ir_emitter.log"; exit 1; }
+wait $EMITTER_PID || { echo "could not set the camera (IR projector $IR_EMITTER, RGB exposure $RGB_EXPOSURE), see $RUN_LOGS/ir_emitter.log"; exit 1; }
 echo "measuring the floor height: hold the camera still, tilted ~40 deg down to the floor about 1 m ahead"
 POSE=$(python3 $RT/floor_init.py --default-height "$CAM_HEIGHT" 2> >(tee "$RUN_LOGS/floor_init.log" >&2)) \
   || { echo "could not measure the start pose, see $RUN_LOGS/floor_init.log"; exit 1; }
