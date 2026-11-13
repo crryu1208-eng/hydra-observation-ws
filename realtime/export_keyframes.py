@@ -16,6 +16,10 @@ Out:
   keyframes/rgb/<node>.png    color image (BGR PNG as recorded)
   keyframes/depth/<node>.png  aligned depth, uint16 mm, same size as the color image
   camera_calib.json           intrinsics, body_T_sensor
+  observations/               keyframe index for tools/dsg_viewer (frames.jsonl, agent_frames.json,
+                              camera_calib.json; images are the ones in keyframes/): the viewer
+                              shows each agent node's RGB / depth
+  export_keyframes.py --viewer-index <out dir>   adds observations/ to an existing export
 """
 import json
 import os
@@ -25,6 +29,32 @@ import sys
 import cv2
 import numpy as np
 
+
+
+def viewer_index(out):
+    """observations/ for the DSG viewer: one frame per keyframe, images from keyframes/."""
+    rows = [json.loads(l) for l in open(f"{out}/keyframes/keyframes.jsonl")]
+    obs = f"{out}/observations"
+    os.makedirs(obs, exist_ok=True)
+    agents = {}
+    with open(f"{obs}/frames.jsonl", "w") as f:
+        for i, r in enumerate(rows):
+            f.write(json.dumps({
+                "frame_id": i, "status": "written", "timestamp_ns": r["timestamp_ns"],
+                "rgb_path": f"../{r['rgb']}", "depth_path": f"../{r['depth']}",
+                "world_T_body": r["world_T_body"], "world_T_sensor": r["world_T_sensor"],
+                "mapping": {"node_id": r["node_id"], "node_symbol": r["node"]},
+                "session": r["session"], "source_frame": r["source_frame"]}) + "\n")
+            agents[str(r["node_id"])] = {"node_symbol": r["node"], "timestamp_ns": r["timestamp_ns"], "frames": [i]}
+    json.dump(agents, open(f"{obs}/agent_frames.json", "w"))
+    if os.path.exists(f"{out}/camera_calib.json"):
+        shutil.copy(f"{out}/camera_calib.json", f"{obs}/camera_calib.json")
+    print(f"viewer index: {len(rows)} keyframes -> {obs}")
+
+
+if sys.argv[1] == "--viewer-index":
+    viewer_index(sys.argv[2])
+    sys.exit(0)
 MAP, FRAMES, OUT = sys.argv[1], sys.argv[2], sys.argv[3]
 if os.path.exists(OUT):
     sys.exit(f"{OUT} exists")
@@ -89,5 +119,6 @@ with open(f"{OUT}/keyframes/keyframes.jsonl", "w") as fo:
     fo.writelines(json.dumps(r) + "\n" for r in rows)
 if calib:
     shutil.copy(calib, f"{OUT}/camera_calib.json")
+viewer_index(OUT)
 sessions = sorted({r["session"] for r in rows})
 print(f"{len(rows)} keyframes exported ({missing} agent nodes without a frame) from {sessions} -> {OUT}")
