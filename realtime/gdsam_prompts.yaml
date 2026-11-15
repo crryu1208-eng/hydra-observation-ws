@@ -1,0 +1,36 @@
+# GroundedSAM2 prompts (gdsam_labels.py): text -> ADE20K label id (realtime/ade20k_gdsam_label_space.yaml
+# makes all of them objects in Hydra). Grounding DINO matches the text; keep it short and concrete.
+prompts:
+  door: 14
+  cabinet: 10
+  chair: 19
+  table: 15
+  desk: 33
+  shelf: 24
+  bookcase: 62
+  box: 41
+  trash can: 138
+  refrigerator: 50
+  sink: 47
+  monitor: 74
+  poster: 100
+  whiteboard: 144
+  bicycle: 127
+  washing machine: 107
+  plant: 17
+  lamp: 36
+  sofa: 23
+  bench: 69
+  counter: 45
+  clock: 148
+  stool: 110
+  bag: 115
+  fan: 139
+  sign: 43
+  bottle: 98
+  mirror: 27
+  picture: 22
+  armchair: 30
+  television: 89
+  radiator: 146
+  cushion: 39
