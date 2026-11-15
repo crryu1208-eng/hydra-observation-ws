@@ -9,13 +9,17 @@
 # rebuild with the bridge odometry variance 1e-4: 7%, p95 8.9 cm).
 # Output <session>/rebuilt/{hydra,observations -> ../observations,logs}, laid out like a session
 # so level_session.py works on it. Takes about the session's length (the bag plays at 1x).
+# Env: OUT_NAME (default rebuilt) names the output folder; SEG_LABELS=<dir> plays label images
+# saved per frame (seg_labels.sh, gdsam_labels.py) instead of running the segmentation;
+# LABELSPACE=<file> is Hydra's label space (e.g. realtime/ade20k_gdsam_label_space.yaml);
+# HYDRA_CONFIG another Hydra config (default realtime/hydra_rt.yaml).
 set -eo pipefail
 set -m  # background launches get their own process group (stopped as a group below)
 S="${1:?session directory}"
 WS=/root/hydra_ws
 RT=$WS/src/hydra-realtime/realtime
 CAM=/camera/camera
-OUT=$S/rebuilt
+OUT=$S/${OUT_NAME:-rebuilt}
 LOGS=$OUT/logs
 [ -f "$S/observations/frames.jsonl" ] || { echo "no $S/observations/frames.jsonl (run map_observations.py first)"; exit 1; }
 [ -e "$OUT" ] && { echo "$OUT already exists"; exit 1; }
@@ -28,14 +32,21 @@ ln -s ../observations "$OUT/observations"
 
 # part:=mapping with slam:=true: Hydra with the RosPoseGraphs tracker (agent nodes from
 # pose_tf_player.py, the live keyframes) and no RTAB-Map / bridge / odometry
-ros2 launch $RT/rt.launch.yaml use_sim_time:=true part:=mapping slam:=true \
+SEG_ARGS=(); [ -n "$SEG_LABELS" ] && SEG_ARGS+=(segmentation:=false)
+[ -n "$LABELSPACE" ] && SEG_ARGS+=(labelspace_path:=$LABELSPACE)
+ros2 launch $RT/rt.launch.yaml use_sim_time:=true part:=mapping slam:=true "${SEG_ARGS[@]}" \
   recorder:=false live_dsg:=false seg_fp16:=true seg_debug_images:=false \
-  hydra_config:=$RT/hydra_rt.yaml log_path:=$OUT/hydra observation_path:=$OUT/unused \
+  hydra_config:=${HYDRA_CONFIG:-$RT/hydra_rt.yaml} log_path:=$OUT/hydra observation_path:=$OUT/unused \
   < /dev/null > "$LOGS/launch.log" 2>&1 &
 LAUNCH_PID=$!
 PTF_PID=
+LIO_PID=
+if [ -n "$SEG_LABELS" ]; then
+  python3 $RT/label_io.py play "$SEG_LABELS" < /dev/null > "$LOGS/label_player.log" 2>&1 &
+  LIO_PID=$!
+fi
 stop_all() {
-  kill -INT $PTF_PID 2>/dev/null || true
+  kill -INT $PTF_PID $LIO_PID 2>/dev/null || true
   kill -INT -- -$LAUNCH_PID 2>/dev/null || true
   for i in $(seq 1 20); do kill -0 -- -$LAUNCH_PID 2>/dev/null || break; sleep 1; done
   kill -KILL -- -$LAUNCH_PID 2>/dev/null || true
@@ -59,7 +70,7 @@ QOS=$LOGS/bag_qos_overrides.yaml
   done
 } > $QOS
 
-wait_log "IExecutionContext creation" 600
+[ -n "$SEG_LABELS" ] || wait_log "IExecutionContext creation" 600
 # Hydra waits for the camera info and static transforms before it reports Running
 for i in $(seq 1 30); do
   ros2 bag play "$S/bag" --topics $CAM/color/camera_info /tf_static --playback-duration 8 \
