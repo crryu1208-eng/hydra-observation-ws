@@ -6,6 +6,9 @@
 launch:
   - arg: {name: camera_ns, default: /camera/camera}
   - arg: {name: labelspace, default: ade20k_full}
+  # Hydra's label space file: realtime/ade20k_gdsam_label_space.yaml = ade20k_full with doors and
+  # counters as objects too (Hydra's own: $(find-pkg-share hydra)/config/label_spaces/ade20k_full_label_space.yaml)
+  - arg: {name: labelspace_path, default: $(dirname)/ade20k_gdsam_label_space.yaml}
   - arg: {name: log_path, default: /root/data/d435i/default/hydra}
   - arg: {name: observation_path, default: /root/data/d435i/default/observations}
   - arg: {name: start_visualizer, default: 'false'}
@@ -215,6 +218,7 @@ launch:
       arg:
         - {name: dataset, value: d435i}
         - {name: labelspace, value: $(var labelspace)}
+        - {name: labelspace_path, value: $(var labelspace_path)}
         - {name: robot_frame, value: camera_link}
         - {name: odom_frame, value: odom}
         - {name: map_frame, value: map}
