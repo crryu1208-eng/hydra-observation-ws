@@ -8,7 +8,7 @@
 # Output: /root/data/realtime/<session>/{bag,observations,hydra,rtabmap,logs}
 # Press Enter (or Ctrl-C) to stop. Env: FPS (default 15), PIPE_FPS (mapping rate, default FPS), OV=1 (open-vocabulary objects), RES (color and depth size, default
 # 1280x720, the D435i depth maximum; 640x480 for the earlier sessions), VIS=1 starts the Hydra visualizer,
-# CAM_NICE (camera driver nice value, default -10), CAM_HEIGHT (camera height when the floor is not in view at the start, default 0), FLOOR_LOCK=0 (no floor height lock, for sessions that change floors), CAM_CPUS / PIPE_CPUS (CPU pinning, PIN=0 off), STOP_AFTER=<s> stops automatically (non-interactive runs), RECORD_IR=1 IR_EMITTER=on|off|onoff records the IR stereo pair (RES default then 848x480), RGB_EXPOSURE (default auto; or 0.1 ms units, e.g. 83 = 1/120 s) and RGB_GAIN (default 50), REBUILD=0 skips rebuilding the map with the loop-closed poses after recording (<session>/rebuilt, about the session's length), LIVE=0 turns off the live scene graph
+# CAM_NICE (camera driver nice value, default -10), CAM_HEIGHT (camera height when the floor is not in view at the start, default 0), FLOOR_LOCK=0 (no floor height lock, for sessions that change floors), CAM_CPUS / PIPE_CPUS (CPU pinning, PIN=0 off), STOP_AFTER=<s> stops automatically (non-interactive runs), RECORD_IR=1 IR_EMITTER=on|off|onoff records the IR stereo pair (RES default then 848x480), RGB_EXPOSURE (default auto; or 0.1 ms units, e.g. 83 = 1/120 s) and RGB_GAIN (default 50), REBUILD=0 skips rebuilding the map with the loop-closed poses after recording (<session>/rebuilt, about the session's length), LIVE=0 turns off the live scene graph, ODOM_DECIMATION (odometry image decimation; default 1, 2 at 1280 wide or on battery)
 # files for the DSG viewer (<session>/hydra/live; on the host:
 #   tools/dsg_viewer/run.sh --live ~/hydra_data/realtime/<session>).
 #
@@ -42,7 +42,17 @@ RES_DEFAULT=1280x720; [ "$RECORD_IR" = 1 ] && RES_DEFAULT=848x480
 RES="${RES:-$RES_DEFAULT}"
 W="${RES%x*}"; H="${RES#*x}"
 # RTAB-Map odometry detects features on a decimated image so its cost stays at the 640-wide level
-ODOM_DECIMATION=1; [ "$W" -ge 1280 ] && ODOM_DECIMATION=2
+ODOM_DECIMATION_AUTO=1; [ "$W" -ge 1280 ] && ODOM_DECIMATION_AUTO=2
+# on battery the laptop CPU slows down: test30b (848x480, 30 fps in, 15 Hz mapping) recorded unplugged ran
+# odometry at 61 ms per frame, 8.8 Hz; its bag replayed with the CPUs capped at 1.5 GHz (same 58 ms):
+# decimation 2 -> 39 ms, 12.5 Hz of 13.8 Hz frames, drift vs the loop-closed path 3.3 -> 4.5 cm rmse over 12 m
+# (plugged in: 29 ms, 2.3 cm). Decided once at the start; ODOM_DECIMATION=<n> overrides
+ON_BATTERY=0
+for ps in /sys/class/power_supply/*; do
+  [ "$(cat "$ps/type" 2>/dev/null)" = Mains ] && [ "$(cat "$ps/online" 2>/dev/null)" = 0 ] && ON_BATTERY=1
+done
+if [ "$ON_BATTERY" = 1 ] && [ "$ODOM_DECIMATION_AUTO" = 1 ]; then ODOM_DECIMATION_AUTO=2; fi
+ODOM_DECIMATION="${ODOM_DECIMATION:-$ODOM_DECIMATION_AUTO}"
 VIS="${VIS:-0}"
 REBUILD="${REBUILD:-1}"
 # IR stereo for visual-inertial odometry tests: RECORD_IR=1 records infra1 / infra2 (same size and
@@ -135,6 +145,8 @@ LAUNCH_PID=; ODOM_PID=
 IMAGE_ARGS=(); [ "$PIPE_FPS" != "$FPS" ] && IMAGE_ARGS=(image_rate:=$PIPE_FPS camera_rate:=$FPS)
 ov=false; [ "$OV" = 1 ] && ov=true
 echo "session $OUT (${W}x${H} @ $FPS fps, mapping at $PIPE_FPS Hz)"
+[ "$ON_BATTERY" = 1 ] && echo "=== WARNING: on battery (CPU slower): odometry image decimation $ODOM_DECIMATION; plug in the charger for full-size odometry ==="
+stamp "odometry image decimation $ODOM_DECIMATION (on battery: $ON_BATTERY)"
 echo "=== Before RECORDING appears (about 12 s): ==="
 echo "===   1. hold the camera still                                                          ==="
 echo "===   2. tilt it ~40 deg down to the floor about 1 m ahead (not a desk top): the floor   ==="
@@ -302,7 +314,7 @@ python3 $WS/src/hydra/scripts/map_observations.py "$OBS" "$LOG_PATH" --max-ancho
   --max-anchor-angle-deg 180 \
   > "$RUN_LOGS/map_observations.log" 2>&1 || echo "map_observations failed, see $RUN_LOGS"
 python3 $WS/src/hydra-realtime/scripts/verify_d435i.py "$OUT" | tee "$RUN_LOGS/verify.log" || true
-python3 $RT/session_check.py "$OUT" 2>&1 | tee "$RUN_LOGS/session_check.log" || true
+python3 $RT/session_check.py "$OUT" "$PIPE_FPS" 2>&1 | tee "$RUN_LOGS/session_check.log" || true
 # the map again with the loop-closed per-frame poses (<session>/rebuilt): mesh, objects and places
 # then agree with the poses the frames carry (the live backend mesh is deformed only approximately)
 if [ "$REBUILD" = 1 ]; then
