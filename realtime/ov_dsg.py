@@ -146,7 +146,12 @@ def mesh_region(V, E, idx, above=0.12, margin=0.5, frac=0.1):
 
 
 WALL_SNAP = ('door',)
-LIGHT_FIT = ('light',)
+LIGHT_FIT = ('light', 'ceiling light')
+# Hydra's closed-set (ADE20K) names -> the open-vocabulary words for the same thing (add_objects closed_map)
+ADE_TO_OV = {'light': 'ceiling light', 'bookcase': 'bookshelf', 'plant': 'potted plant', 'pot': 'potted plant',
+             'flowerpot': 'potted plant', 'swivel': 'chair', 'swivel chair': 'chair', 'ashcan': 'trash can',
+             'wardrobe': 'cabinet', 'signboard': 'sign', 'painting': 'picture frame', 'crt screen': 'monitor',
+             'television receiver': 'tv', 'bulletin board': 'notice', 'chest of drawers': 'drawer', 'column': 'pillar'}
 
 
 def light_region(V, bright, lo, hi, reach=0.3, thr=0.78, cell=0.1, min_pts=15, row_tol=0.25, gap=0.7):
@@ -227,10 +232,15 @@ def snap_to_wall(V, lo, hi, reach=0.25, thick=0.16):
     return lo, hi
 
 
-def add_objects(G, objects, vocab, odom_pose=None, only_confirmed=True, dedup=0.5, standard=True):
+def add_objects(G, objects, vocab, odom_pose=None, only_confirmed=True, dedup=0.5, standard=True, closed_map=None,
+                mesh_fit=True, box_cache=None):
     """Add the objects to G (in place; open-vocabulary objects of an earlier call are replaced). Returns counts.
     standard: the objects go into Hydra's own objects layer (layer 2 partition 0, symbols 'O<n>' after Hydra's), one
-    labelspace for all objects, mesh_connections and a parent place for every object; else partition 1 ('V<id>')."""
+    labelspace for all objects, mesh_connections and a parent place for every object; else partition 1 ('V<id>').
+    closed_map: Hydra's object names are renamed with it (e.g. ADE_TO_OV); their first names are returned in
+    'closed_names' ({symbol: name}).
+    mesh_fit=False with a box_cache (dict, filled by the calls with mesh_fit=True): the boxes and mesh_connections
+    of the last fit are reused instead of fitting the mesh again (live: the fit takes seconds on a big mesh)."""
     for part in (PARTITION, 0):
         if G.has_layer(LAYER, part):
             for n in list(G.get_layer(LAYER, part).nodes):
@@ -260,33 +270,36 @@ def add_objects(G, objects, vocab, odom_pose=None, only_confirmed=True, dedup=0.
         if k is not None:
             c2 = R @ c + t; shift.append(float(np.linalg.norm(c2 - c))); c = c2
         occ = cell_keys(cell_centers(o['cells'], o['cell']) @ R.T + t, o['cell']) if o.get('cells') else None
-        sel.append((o, c, occ))
-    cell = next((o['cell'] for o, _, occ in sel if occ is not None), None)
+        sel.append((o, c, occ, R, t))
+    cell = next((o['cell'] for o, _, occ, _, _ in sel if occ is not None), None)
     # numbers after all of Hydra's objects, also the ones replaced below (no symbol reused by another object)
     next_id = 1 + max([n.id.category_id for n in G.get_layer(LAYER).nodes], default=-1) if G.has_layer(LAYER) else 0
     # closed-set objects the open-vocabulary ones cover
     replaced = []
-    occ_all = [occ for _, _, occ in sel if occ is not None]
+    occ_all = [occ for _, _, occ, _, _ in sel if occ is not None]
     if dedup > 0 and occ_all and G.has_layer(LAYER) and len(V):
         occ_all = np.unique(np.concatenate(occ_all))
         for n in list(G.get_layer(LAYER).nodes):
             idx = np.asarray(n.attributes.mesh_connections, np.int64); idx = idx[idx < len(V)]
             if len(idx) and np.isin(cell_keys(V[idx], cell), occ_all).mean() >= dedup:
                 replaced.append(n.id.str()); G.remove_node(n.id)
-    Vkeys = cell_keys(V, cell) if (standard and cell is not None and len(V)) else None
+    Vkeys = cell_keys(V, cell) if (standard and mesh_fit and cell is not None and len(V)) else None
     E = mesh_edges(G) if Vkeys is not None else None
     part = 0 if standard else PARTITION
     if standard:  # one labelspace: the vocabulary, then the closed-set names it lacks
         names = dict(vocab=list(vocab))
         old = G.get_labelspace(LAYER, 0)
         old = dict(old.labels_to_names) if old is not None else {}
-        extra = []
+        extra = []; closed_names = {}
         for n in G.get_layer(LAYER).nodes:
             a = n.attributes; w = a.name or old.get(a.semantic_label, f'label_{a.semantic_label}')
+            closed_names[n.id.str()] = w
+            if closed_map:
+                w = closed_map.get(w, w)
             if w not in widx:
                 widx[w] = len(vocab) + len(extra); extra.append(w)
             a.name = w; a.semantic_label = widx[w]
-        for o, _, _ in sel:  # labels set by hand outside the vocabulary
+        for o, _, _, _, _ in sel:  # labels set by hand outside the vocabulary
             w = o.get('label', '')
             if w and w not in widx:
                 widx[w] = len(vocab) + len(extra); extra.append(w)
@@ -294,13 +307,17 @@ def add_objects(G, objects, vocab, odom_pose=None, only_confirmed=True, dedup=0.
     else:
         G.set_labelspace(dsg.Labelspace({i: w for i, w in enumerate(vocab)}), LAYER, PARTITION)
     n_add = n_edge = 0; ids = {}
-    for o, c, occ in sel:
+    for o, c, occ, R, t in sel:  # R, t: this object's loop-closure correction
         size = np.asarray(o['size'], float)
         a = dsg.ObjectNodeAttributes()
         a.position = c; a.name = o.get('label', ''); a.semantic_label = widx.get(o.get('label'), 0)
         a.bounding_box = dsg.BoundingBox(size.astype(np.float32), c.astype(np.float32))
         a.last_update_time_ns = int(o['last'])
-        if Vkeys is not None and occ is not None:
+        key = ('ov', int(o['id']))
+        if not mesh_fit and box_cache is not None and key in box_cache:  # the last fit
+            lo, hi, mc = box_cache[key]; c = (lo + hi) / 2
+            a.mesh_connections = mc; a.position = c; a.bounding_box = dsg.BoundingBox((hi - lo).astype(np.float32), c.astype(np.float32))
+        elif Vkeys is not None and occ is not None:
             idx, lo, hi = mesh_region(V, E, np.nonzero(np.isin(Vkeys, occ))[0])
             a.mesh_connections = idx.tolist()
             if o.get('core'):  # small object: the voxels its masks agree on (ov_session.core_cells)
@@ -332,6 +349,8 @@ def add_objects(G, objects, vocab, odom_pose=None, only_confirmed=True, dedup=0.
             if lo is not None:  # the box of the object's mesh (or core), not of its fused cells
                 c = (lo + hi) / 2
                 a.position = c; a.bounding_box = dsg.BoundingBox((hi - lo).astype(np.float32), c.astype(np.float32))
+                if box_cache is not None:
+                    box_cache[key] = (np.asarray(lo, float), np.asarray(hi, float), list(a.mesh_connections))
         e = decode_emb(o.get('emb'))
         if e is not None:
             a.semantic_feature = e.reshape(-1, 1)
@@ -361,6 +380,15 @@ def add_objects(G, objects, vocab, odom_pose=None, only_confirmed=True, dedup=0.
                 c = (lo + hi) / 2; a = n.attributes
                 a.mesh_connections = r.tolist(); a.position = c
                 a.bounding_box = dsg.BoundingBox((hi - lo).astype(np.float32), c.astype(np.float32)); refit += 1
+                if box_cache is not None:
+                    box_cache[('closed', n.id.str())] = (np.asarray(lo, float), np.asarray(hi, float), r.tolist())
+    elif box_cache:  # mesh_fit=False: Hydra's objects keep their last fit
+        for n in G.get_layer(LAYER).nodes:
+            k_ = ('closed', n.id.str())
+            if not is_ov(n) and k_ in box_cache:
+                lo, hi, mc = box_cache[k_]; c = (lo + hi) / 2; a = n.attributes
+                a.mesh_connections = mc; a.position = c
+                a.bounding_box = dsg.BoundingBox((hi - lo).astype(np.float32), c.astype(np.float32))
     orphans = 0
     if standard and len(P):  # every object with a parent place (Hydra's own ones too)
         for n in G.get_layer(LAYER).nodes:
@@ -371,8 +399,60 @@ def add_objects(G, objects, vocab, odom_pose=None, only_confirmed=True, dedup=0.
     if replaced:
         G.metadata.add({'ov_replaced': replaced})
     return dict(replaced=len(replaced), replaced_ids=replaced, objects=n_add, place_edges=n_edge,
+                closed_names=closed_names if standard else {},
                 closed_set_kept=G.get_layer(LAYER).num_nodes() - (n_add if standard else 0), orphans_attached=orphans, closed_set_refit=refit,
                 corrected=len(shift), shift_max=max(shift, default=0.0), shift_mean=float(np.mean(shift)) if shift else 0.0)
+
+
+def closed_boxes(G, to_odom=None):
+    """Hydra's own objects (no metadata.ov) for ov_objects.py to observe: [{sym, name, lo, hi}], boxes in the
+    odometry frame (to_odom: 4x4 world -> odometry, e.g. the inverse correction of the newest agent node)."""
+    out = []
+    if not G.has_layer(LAYER):
+        return out
+    for n in G.get_layer(LAYER).nodes:
+        if is_ov(n):
+            continue
+        b = n.attributes.bounding_box; c = np.asarray(b.world_P_center, float); d = np.asarray(b.dimensions, float)
+        lo, hi = c - d / 2, c + d / 2
+        if to_odom is not None:
+            X = np.array([[x, y, z] for x in (lo[0], hi[0]) for y in (lo[1], hi[1]) for z in (lo[2], hi[2])])
+            X = X @ to_odom[:3, :3].T + to_odom[:3, 3]; lo, hi = X.min(0), X.max(0)
+        out.append(dict(sym=n.id.str(), name=n.attributes.name, lo=lo.tolist(), hi=hi.tolist()))
+    return out
+
+
+def apply_closed(G, closed, names=None, correction=None):
+    """Open-vocabulary attributes for Hydra's own objects, observed by ov_objects.py ({symbol: {emb (base64 float16),
+    n_obs, top3, text_sim, text_margin, first, last, best_stamp, best_box, light: [lo, hi] (odometry frame)}}):
+    semantic_feature = the mean SigLIP2 crop embedding, metadata.ov = {id: None, source: 'hydra', hydra_symbol,
+    hydra_label, ...}; a ceiling light's box from the white pixels of its best image. correction(stamp) -> 4x4
+    odometry -> world (or None). Returns the number of objects given attributes."""
+    n_set = 0
+    for s, o in (closed or {}).items():
+        try:
+            sym = dsg.NodeSymbol(s[0], int(s[1:]))
+        except ValueError:
+            continue
+        if not G.has_node(sym.value) or is_ov(G.get_node(sym.value)):
+            continue
+        a = G.get_node(sym.value).attributes
+        e = decode_emb(o.get('emb'))
+        if e is not None:
+            a.semantic_feature = e.reshape(-1, 1)
+        if o.get('light') and a.name in LIGHT_FIT:
+            lo, hi = np.asarray(o['light'][0], float), np.asarray(o['light'][1], float)
+            T = correction(int(o['light_stamp'])) if correction is not None and o.get('light_stamp') else None
+            if T is not None:
+                X = np.array([[x, y, z] for x in (lo[0], hi[0]) for y in (lo[1], hi[1]) for z in (lo[2], hi[2])])
+                X = X @ T[:3, :3].T + T[:3, 3]; lo, hi = X.min(0), X.max(0)
+            c = (lo + hi) / 2; a.position = c
+            a.bounding_box = dsg.BoundingBox((hi - lo).astype(np.float32), c.astype(np.float32))
+        a.metadata.set({'ov': dict(id=None, source='hydra', hydra_symbol=s, hydra_label=(names or {}).get(s, a.name),
+                                   **{k: o.get(k) for k in ('n_obs', 'top3', 'text_sim', 'text_margin', 'first', 'last',
+                                                            'best_stamp', 'best_box')})})
+        n_set += 1
+    return n_set
 
 
 def standardize(G, drop_2d_places=False):

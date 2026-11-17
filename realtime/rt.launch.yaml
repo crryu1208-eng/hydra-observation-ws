@@ -186,7 +186,7 @@ launch:
       cmd: >-
         python3 $(dirname)/ov_objects.py --ros-args -p use_sim_time:=$(var use_sim_time)
         -p ov_bench:=$(var ov_bench) -p out_dir:=$(var ov_objects_out)
-        -r color:=$(var rgb) -r labels:=$(var camera_ns)/semantic/image_raw -r depth:=$(var depth) -r objects:=/ov_objects/objects
+        -r color:=$(var rgb) -r labels:=$(var camera_ns)/semantic/image_raw -r depth:=$(var depth) -r objects:=/ov_objects/objects -r closed_objects:=/ov_objects/closed_objects
       env:
         - {name: PYTHONPATH, value: "$(env PYTHONPATH):$(var ov_bench)/.venv/lib/python3.12/site-packages"}
       output: screen

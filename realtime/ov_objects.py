@@ -2,6 +2,8 @@
 EfficientViT-SAM Apache-2.0, SigLIP2 / open_clip Apache-2.0 / MIT).
 
 Per keyframe (every `period` s):
+ 0. (wait_for_pose) keyframes before the odometry frame and the camera are connected in TF are skipped (no pose:
+    they could not be fused); the GPU work starts with the odometry
  1. keyframe = sharpest color frame (variance of the Laplacian at 640x360) received since the previous
     keyframe whose closed-set label image has arrived (ov_bench/acc_blur*.py: blurred keyframes 12% -> 2%)
  2. EfficientViT-SAM L0 TensorRT automatic masks, `pps` x `pps` point grid (ov_bench/evsam_bench.py TrtFastAMG)
@@ -14,6 +16,12 @@ Per keyframe (every `period` s):
  7. every `publish_every` fused keyframes the objects go out on `objects` (std_msgs/String, JSON: vocab + objects
     with flags and the mean SigLIP2 embedding as base64 float16); realtime/live_dsg_dump.py puts the confirmed ones
     into the scene graph it writes (realtime/ov_dsg.py)
+ 8. Hydra's own objects (boxes in the odometry frame on `closed_objects`, from live_dsg_dump.py): in each keyframe
+    where one is fully in front, >= 70% inside the image, >= 24 px (at 848 wide) and not hidden (median depth in its
+    projected box >= its distance - 0.3 m - half its size), its crop (box + 10%) is embedded with SigLIP2; the mean
+    goes out with the objects ('closed'), so the graph gives them the same attributes (ov_dsg.apply_closed). Ceiling
+    lights: the white pixels (gray >= 235, low saturation, blobs >= 150 px at 848 wide) around the light, cut with
+    the ceiling plane at their median depth, boxed (2-98%) in the keyframe with the most of them.
 
 Heavy code and engines come from the ov_bench directory (parameter ov_bench), whose virtualenv packages must be
 on PYTHONPATH (rt.launch.yaml ov_objects:=true does this). Output in out_dir (optional): kf_<stamp>.npz per
@@ -63,7 +71,11 @@ class OvObjects(Node):
         self.select_sharpest = p('select_sharpest', True)
         self.fusion = p('fusion', True); self.world_frame = p('world_frame', 'odom'); self.min_obs = p('min_obs', 2)
         self.publish_every = p('publish_every', 4)  # fused keyframes between object messages (2 s at 2 Hz)
+        # until the odometry frame and the camera are connected in TF (odometry starts 15-25 s after the camera in
+        # run_realtime.sh), keyframes have no pose and could not be fused: skip them before the GPU work
+        self.wait_for_pose = p('wait_for_pose', True); self.pose_ready = False; self.n_waited = 0
         K = p('intrinsics', [910.663, 910.838, 637.358, 381.687])  # fx fy cx cy, D435i color 1280x720 (camera_calib.json)
+        self.K = tuple(K)
         if self.out_dir: os.makedirs(self.out_dir, exist_ok=True)
         if self.fusion:  # before the ~15 s model load: the camera's /tf_static is published once, early (missed in ovn_f3)
             self.tf = tf2_ros.Buffer(cache_time=Duration(seconds=10)); self.tfl = tf2_ros.TransformListener(self.tf, self)
@@ -82,6 +94,8 @@ class OvObjects(Node):
                                                  history=HistoryPolicy.KEEP_LAST, depth=1))
             self.fuser = Fusion(tuple(K), min_obs=self.min_obs); self.fq = queue.Queue(); self.fstats = []; self.fmiss = collections.Counter()
             self.fworker = threading.Thread(target=self.fusion_loop, daemon=True); self.fworker.start()
+            self.closed_in = None; self.closed_acc = {}; self.clock = threading.Lock()
+            self.create_subscription(String, 'closed_objects', self.on_closed, 1)
         self.running = True; self.worker = threading.Thread(target=self.loop, daemon=True); self.worker.start()
         self.get_logger().info(f'ov_objects ready (pps {self.pps}, max_emb {self.max_emb}, sharpest {self.select_sharpest})')
 
@@ -115,6 +129,89 @@ class OvObjects(Node):
             self.depths[msg.header.stamp.sec * 10**9 + msg.header.stamp.nanosec] = msg
             while len(self.depths) > 60: self.depths.popitem(last=False)
 
+    def on_closed(self, msg):
+        self.closed_in = json.loads(msg.data).get('objects', [])
+
+    def observe_closed(self, stamp, rgb, frame_id):
+        """Hydra's objects seen in this keyframe: SigLIP2 crop embeddings (and white pixels of ceiling lights)"""
+        objs = self.closed_in
+        if not objs: return
+        with self.lock: dm = self.depths.get(stamp)
+        try:
+            tr = self.tf.lookup_transform(self.world_frame, frame_id, Time(nanoseconds=stamp), timeout=Duration(seconds=0.1)).transform
+        except Exception:
+            return
+        q, tt = tr.rotation, tr.translation; R = quat_to_R((q.w, q.x, q.y, q.z)); t = np.array([tt.x, tt.y, tt.z])
+        depth = to_array(dm).astype(np.float32) / 1000.0 if dm is not None else None
+        H, W = rgb.shape[:2]; s = W / 1280.0; fx, fy, cx, cy = [v * s for v in self.K]; px = W / 848.0
+        corners = lambda lo, hi: np.array([[x, y, z] for x in (lo[0], hi[0]) for y in (lo[1], hi[1]) for z in (lo[2], hi[2])])
+        boxes, seen = [], []
+        for o in objs:
+            lo, hi = np.asarray(o['lo'], float), np.asarray(o['hi'], float)
+            P = (corners(lo, hi) - t) @ R; cz = float(((lo + hi) / 2 - t) @ R[:, 2])
+            if (P[:, 2] < 0.2).any() or cz > 6: continue
+            u = fx * P[:, 0] / P[:, 2] + cx; v = fy * P[:, 1] / P[:, 2] + cy
+            x0, x1, y0, y1 = u.min(), u.max(), v.min(), v.max(); A = (x1 - x0) * (y1 - y0)
+            if max(0, min(x1, W) - max(x0, 0)) * max(0, min(y1, H) - max(y0, 0)) / max(A, 1) < 0.7: continue
+            if min(x1 - x0, y1 - y0) < 24 * px: continue
+            x0, y0, x1, y1 = max(0.0, x0), max(0.0, y0), min(float(W), x1), min(float(H), y1)
+            if depth is not None:
+                zz = depth[int(y0):int(y1), int(x0):int(x1)]; zz = zz[zz > 0.2]
+                if len(zz) and np.median(zz) < cz - 0.3 - (hi - lo).max() / 2: continue  # something in front
+            w, h = x1 - x0, y1 - y0
+            boxes.append([max(0, x0 - .1 * w), max(0, y0 - .1 * h), min(W - 1, x1 + .1 * w), min(H - 1, y1 + .1 * h)])
+            seen.append((o, A, [x0, y0, w, h]))
+        if not boxes: return
+        torch = self.torch; bt = torch.tensor(boxes, device='cuda', dtype=torch.float32)
+        E = torch.cat([self.emb(rgb, bt[c:c + self.max_emb]).float() for c in range(0, len(bt), self.max_emb)])
+        E = (E / E.norm(dim=-1, keepdim=True)).cpu().numpy().astype(np.float64)
+        with self.clock:
+            for (o, A, bx), e in zip(seen, E):
+                a = self.closed_acc.setdefault(o['sym'], dict(sum=np.zeros(len(e)), n=0, first=stamp, last=stamp, best=(0.0, stamp, bx), light=None))
+                a['sum'] += e; a['n'] += 1; a['first'] = min(a['first'], stamp); a['last'] = max(a['last'], stamp)
+                if A > a['best'][0]: a['best'] = (A, stamp, bx)
+        if depth is None: return
+        g = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY); sat = rgb.max(2).astype(np.int16) - rgb.min(2)
+        for o, _, _ in seen:
+            if o.get('name') not in ('light', 'ceiling light'): continue
+            lo, hi = np.asarray(o['lo'], float), np.asarray(o['hi'], float); elo, ehi = lo - [0.8, 0.8, 0.3], hi + [0.8, 0.8, 0.3]
+            P = (corners(elo, ehi) - t) @ R; P[:, 2] = np.maximum(P[:, 2], 0.1)
+            u = fx * P[:, 0] / P[:, 2] + cx; v = fy * P[:, 1] / P[:, 2] + cy
+            x0, x1, y0, y1 = int(np.clip(u.min(), 0, W)), int(np.clip(u.max(), 0, W)), int(np.clip(v.min(), 0, H)), int(np.clip(v.max(), 0, H))
+            if (x1 - x0) * (y1 - y0) < 2000 * px * px: continue
+            m = np.zeros(g.shape, np.uint8); m[y0:y1, x0:x1] = (g[y0:y1, x0:x1] >= 235) & (sat[y0:y1, x0:x1] <= 40)
+            n, lab, st, _ = cv2.connectedComponentsWithStats(m)
+            keep = [i for i in range(1, n) if st[i, 4] >= 150 * px * px]
+            if not keep: continue
+            blob = np.isin(lab, keep); src = blob
+            if ((depth[blob] > 0.3) & (depth[blob] < 8)).sum() < 20:  # no depth on the lamp: the ceiling around it
+                src = cv2.dilate(blob.astype(np.uint8), np.ones((15, 15), np.uint8)).astype(bool) & ~blob
+            sv, su = np.nonzero(src); sz = depth[sv, su]; k = (sz > 0.3) & (sz < 8)
+            if k.sum() < 20: continue
+            Z = np.stack([(su[k] - cx) * sz[k] / fx, (sv[k] - cy) * sz[k] / fy, sz[k]], 1) @ R.T + t
+            zw = float(np.median(Z[:, 2]))  # ceiling height at the light
+            vv, uu = np.nonzero(blob)
+            d = np.stack([(uu - cx) / fx, (vv - cy) / fy, np.ones(len(uu))], 1) @ R.T; sc = (zw - t[2]) / d[:, 2]
+            ok = sc > 0; Q = t + sc[ok, None] * d[ok]
+            Q = Q[np.all((Q[:, :2] >= elo[:2]) & (Q[:, :2] <= ehi[:2]), 1)]
+            if len(Q) < 50: continue
+            blo, bhi = np.percentile(Q, 2, 0), np.percentile(Q, 98, 0); blo[2], bhi[2] = zw - 0.05, zw + 0.05
+            with self.clock:
+                a = self.closed_acc[o['sym']]
+                if a['light'] is None or len(Q) > a['light'][0]: a['light'] = (len(Q), stamp, blo.tolist(), bhi.tolist())
+
+    def closed_results(self):
+        out = {}
+        with self.clock:
+            for s, a in self.closed_acc.items():
+                m = a['sum'] / max(np.linalg.norm(a['sum']), 1e-9); sc = self.text_np @ m; j = np.argsort(-sc)
+                r = dict(emb=base64.b64encode(m.astype(np.float16).tobytes()).decode(), n_obs=a['n'], first=a['first'], last=a['last'],
+                         best_stamp=a['best'][1], best_box=[float(x) for x in a['best'][2]], top3=[self.vocab[i] for i in j[:3]],
+                         text_sim=float(sc[j[0]]), text_margin=float(sc[j[0]] - sc[j[1]]))
+                if a['light'] is not None: r['light'] = [a['light'][2], a['light'][3]]; r['light_stamp'] = a['light'][1]
+                out[s] = r
+        return out
+
     def fusion_loop(self):
         while True:
             job = self.fq.get()
@@ -135,7 +232,8 @@ class OvObjects(Node):
         for r in res:
             r.pop('dets', None); r.pop('votes', None)
             r['emb'] = base64.b64encode(self.fuser.objs[r['id']].unit().astype(np.float16).tobytes()).decode()
-        self.obj_pub.publish(String(data=json.dumps(dict(stamp=self.fuser_last_stamp, vocab=self.vocab, objects=res))))
+        self.obj_pub.publish(String(data=json.dumps(dict(stamp=self.fuser_last_stamp, vocab=self.vocab, objects=res,
+                                                         closed=self.closed_results()))))
 
     def write_objects(self):
         if not self.out_dir: return
@@ -218,11 +316,23 @@ class OvObjects(Node):
 
     def keyframe(self, f, lab, cand, frame_id):
         stamp, recv, rgb, s = f; t_start = time.time()
+        if self.fusion and self.wait_for_pose and not self.pose_ready:
+            if not self.tf.can_transform(self.world_frame, frame_id, Time()):  # latest: is the tree connected yet?
+                self.n_waited += 1
+                if self.n_waited == 1: self.get_logger().info(f'waiting for {self.world_frame} <- {frame_id} in TF: keyframes skipped')
+                return
+            self.pose_ready = True
+            self.get_logger().info(f'{self.world_frame} <- {frame_id} in TF after {self.n_waited} skipped keyframes')
         info, out = self.process(rgb, lab)
         t_done = time.time()
         if out is not None and self.out_dir:
             np.savez(os.path.join(self.out_dir, f'kf_{stamp}.npz'), **out)
         if out is not None and self.fusion: self.to_fusion(stamp, frame_id, out)
+        if self.fusion and self.closed_in:
+            try:
+                self.observe_closed(stamp, rgb, frame_id)
+            except Exception as e:
+                self.get_logger().error(f'closed objects failed: {e!r}')
         r = dict(stamp=stamp, select_ms=self.t_select * 1e3, wait_ms=(t_start - recv) * 1e3, age_ms=(t_done - recv) * 1e3, sharp=s,
                  sharp_newest=cand[-1][3], offset=len(cand) - 1 - cand.index(f), n_window=len(cand),
                  n_cands=info['n_cands'], dropped_stuff=info.get('dropped_stuff', 0), kept=info['kept'],
@@ -233,9 +343,9 @@ class OvObjects(Node):
 
     def summary(self):
         S = self.stats
-        if not S: return dict(n=0, misses=self.misses, color_received=self.n_color, labels_received=self.n_labels)
+        if not S: return dict(n=0, misses=self.misses, waited_for_pose=self.n_waited, color_received=self.n_color, labels_received=self.n_labels)
         q = lambda k, p: float(np.percentile([r[k] for r in S], p))
-        res = dict(n=len(S), misses=self.misses, color_received=self.n_color, labels_received=self.n_labels,
+        res = dict(n=len(S), misses=self.misses, waited_for_pose=self.n_waited, color_received=self.n_color, labels_received=self.n_labels,
                    window_mean=float(np.mean([r['n_window'] for r in S])), over_period=sum(r['total_ms'] > self.period * 1e3 for r in S),
                    cands_mean=float(np.mean([r['n_cands'] for r in S])), cands_max=max(r['n_cands'] for r in S),
                    kept_mean=float(np.mean([r['kept'] for r in S])), dropped_stuff_mean=float(np.mean([r['dropped_stuff'] for r in S])),

@@ -12,6 +12,10 @@ Open-vocabulary objects (realtime/ov_objects.py, topic /ov_objects/objects) are 
 layer 2 partition 1 nodes (realtime/ov_dsg.py), only those flagged confirmed (parameter ov_all: all), moved
 with Hydra's loop-closure correction: the odometry pose of each agent node comes from TF (odom <- robot_frame
 at the node's stamp, looked up once per node while TF still holds it).
+Hydra's own objects: their boxes go out (odometry frame) on /ov_objects/closed_objects; ov_objects.py embeds what it
+sees of them and sends it back with the objects ('closed'), so they get the same open-vocabulary attributes
+(ov_dsg.apply_closed: semantic_feature, metadata.ov with source 'hydra', ceiling lights boxed from their images).
+Their ADE20K names become the open-vocabulary words for the same thing (ov_dsg.ADE_TO_OV; parameter ov_relabel).
 Needs the spark_dsg python bindings in the container (realtime/install_live_viewer_deps.sh).
 """
 import os
@@ -53,6 +57,11 @@ class LiveDsgDump(Node):
         self.agent_odom = {}  # agent stamp ns -> 4x4 odometry pose (None: TF no longer has it)
         self.ov = None
         self.create_subscription(String, "/ov_objects/objects", self.on_ov, 1)
+        self.ov_relabel = bool(self.declare_parameter("ov_relabel", True).value)
+        # fit the objects' boxes to the mesh every this many seconds (seconds on a big mesh), the last fit in between
+        self.mesh_fit_period = float(self.declare_parameter("ov_mesh_fit_period", 10.0).value)
+        self.box_cache = {}; self.last_fit = -1e9
+        self.closed_pub = self.create_publisher(String, "/ov_objects/closed_objects", 1)
         self.create_timer(period, self.write)
         self.get_logger().info(f"live scene graph -> {self.out} every {period} s")
 
@@ -100,10 +109,23 @@ class LiveDsgDump(Node):
             }
             self._replace("mesh.npz", lambda p: np.savez(p, **arrays))
         ov = ""
+        stamps, C = ov_dsg.corrections(G, self.odom_pose)
+
+        def correction(st):
+            k = ov_dsg.nearest(stamps, st)
+            return C[k] if k is not None else None
         if self.ov is not None:
-            r = ov_dsg.add_objects(G, self.ov["objects"], self.ov["vocab"], self.odom_pose, not self.ov_all, self.ov_dedup)
+            fit = time.monotonic() - self.last_fit >= self.mesh_fit_period
+            if fit:
+                self.last_fit = time.monotonic(); self.box_cache = {}
+            r = ov_dsg.add_objects(G, self.ov["objects"], self.ov["vocab"], self.odom_pose, not self.ov_all, self.ov_dedup,
+                                   closed_map=ov_dsg.ADE_TO_OV if self.ov_relabel else None, mesh_fit=fit, box_cache=self.box_cache)
+            n_closed = ov_dsg.apply_closed(G, self.ov.get("closed"), r.get("closed_names"), correction)
             ov = (f", {r['objects']} open-vocab objects (shift max {r['shift_max']:.2f} m), "
-                  f"{r['replaced']} closed-set objects replaced")
+                  f"{r['replaced']} closed-set objects replaced, {n_closed} closed-set objects with SigLIP2")
+        # Hydra's objects for ov_objects.py to look at, in its (odometry) frame: the newest node's correction undone
+        to_odom = np.linalg.inv(C[-1]) if len(C) else None
+        self.closed_pub.publish(String(data=json.dumps(dict(objects=ov_dsg.closed_boxes(G, to_odom)))))
         self._replace("dsg.json", lambda p: G.save(str(p), include_mesh=False))
         self.written += 1
         if self.written % 10 == 1:

@@ -137,12 +137,13 @@ def join_manual(res, groups):
 
 
 class Obj:
-    __slots__ = ('id', 'vox', 'akeys', 'lo', 'hi', 'emb', 'n', 'votes', 'best', 'first', 'last', 'dets', 'stuff')
+    __slots__ = ('id', 'vox', 'akeys', 'lo', 'hi', 'emb', 'n', 'votes', 'best', 'first', 'last', 'dets', 'stuff', 'dvox')
 
     def __init__(self, oid, d, stamp):
         self.id = oid; self.vox = d['vox']; self.akeys = d['akeys']; self.lo, self.hi = d['lo'], d['hi']
         self.emb = d['emb'].astype(np.float64).copy(); self.n = 1; self.votes = {d['word']: 1}
         self.best = (d['area'], stamp, d['box']); self.first = self.last = stamp; self.dets = [(stamp, d['k'])]; self.stuff = d['stuff']
+        self.dvox = [d['vox']]  # each detection's voxels, for the core of a small object (core())
 
     def add(self, d, stamp, vsize, asize):
         self.vox = np.union1d(self.vox, d['vox']); self.akeys = np.union1d(self.akeys, d['akeys'])
@@ -150,6 +151,7 @@ class Obj:
         self.emb += d['emb']; self.n += 1; self.votes[d['word']] = self.votes.get(d['word'], 0) + 1
         if d['area'] > self.best[0]: self.best = (d['area'], stamp, d['box'])
         self.last = max(self.last, stamp); self.first = min(self.first, stamp); self.dets.append((stamp, d['k'])); self.stuff += d['stuff']
+        self.dvox.append(d['vox'])
 
     def absorb(self, o):
         self.vox = np.union1d(self.vox, o.vox); self.akeys = np.union1d(self.akeys, o.akeys)
@@ -157,6 +159,7 @@ class Obj:
         for w, c in o.votes.items(): self.votes[w] = self.votes.get(w, 0) + c
         if o.best[0] > self.best[0]: self.best = o.best
         self.first = min(self.first, o.first); self.last = max(self.last, o.last); self.dets += o.dets; self.stuff += o.stuff
+        self.dvox += o.dvox
 
     def unit(self):
         return self.emb / max(np.linalg.norm(self.emb), 1e-9)
@@ -165,13 +168,14 @@ class Obj:
 class Fusion:
     def __init__(self, K, voxel=0.05, assoc_voxel=0.10, gap=0.2, depth_range=(0.2, 4.0), min_points=60,
                  min_overlap=0.4, min_cover=0.15, min_sim=0.85, contain_sim=0.88, max_extent=3.0, merge_overlap=0.5, merge_sim=0.9, merge_every=10, min_obs=2,
-                 wall_stuff=0.7, wall_gap=-0.02, confirm_obs=3, join=True):
+                 wall_stuff=0.7, wall_gap=-0.02, confirm_obs=3, join=True, core_frac=0.25, core_max_size=1.0):
         self.K = K  # fx fy cx cy of the full-resolution color image
         self.voxel, self.asize, self.gap, self.dr, self.min_points = voxel, assoc_voxel, gap, depth_range, min_points
         self.min_overlap, self.min_cover, self.min_sim, self.merge_overlap, self.merge_sim = min_overlap, min_cover, min_sim, merge_overlap, merge_sim
         self.contain_sim, self.max_extent = contain_sim, max_extent
         self.merge_every, self.min_obs = merge_every, min_obs
         self.wall_stuff, self.wall_gap, self.confirm_obs, self.join = wall_stuff, wall_gap, confirm_obs, join
+        self.core_frac, self.core_max_size = core_frac, core_max_size
         self.objs = {}; self.dirty = set(); self.next_id = 0; self.n_kf = 0; self.stats = dict(dets=0, too_few_points=0, matched=0, new=0, merged=0)
 
     def detection_points(self, mask, depth_m, Rt):
@@ -268,6 +272,15 @@ class Fusion:
                                      - max(s[i] for i, w in enumerate(vocab) if w not in STUFF_WORDS)))
         return f
 
+    def core(self, o):
+        """Small object: the voxels that >= `core_frac` of its detections (>= 2) put a point in (the union of all of them
+        is widened by mask edges and pose offsets; same as ov_session.core_cells offline). None: too few."""
+        if len(o.dvox) < 2:
+            return None
+        k, c = np.unique(np.concatenate(o.dvox), return_counts=True)
+        core = k[c >= max(2, int(np.ceil(self.core_frac * len(o.dvox))))]
+        return core if len(core) >= 8 else None
+
     def results(self, text=None, vocab=None):
         out = []
         for o in self.objs.values():
@@ -278,6 +291,10 @@ class Fusion:
             r['wall'] = bool(r['stuff'] >= self.wall_stuff and r.get('stuff_gap', 1.0) > self.wall_gap)
             r['confirmed'] = bool(not r['wall'] and r['n_obs'] >= self.confirm_obs)
             r['cells'] = o.akeys.tolist(); r['cell'] = self.asize  # occupied assoc_voxel cells (keys()), for ov_dsg.py
+            if r['confirmed'] and max(r['size']) < self.core_max_size:
+                core = self.core(o)
+                if core is not None:
+                    r['core'] = core.tolist(); r['core_voxel'] = self.voxel
             if self.join and text is not None:
                 r['emb'] = base64.b64encode(o.unit().astype(np.float16).tobytes()).decode()
             out.append(r)
