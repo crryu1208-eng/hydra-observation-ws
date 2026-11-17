@@ -45,6 +45,8 @@ launch:
   # keyframes at slam_rate Hz, database at slam_db
   - arg: {name: slam, default: 'false'}
   - arg: {name: slam_rate, default: '2'}
+  - arg: {name: slam_odom_info, default: 'false'}  # reuse rgbd_odometry's features (/rtabmap/odom_info) instead of extracting again
+  - arg: {name: slam_config, default: ''}  # optional RTAB-Map .ini with extra parameters ([Core] section)
   - arg: {name: slam_db, default: /root/data/realtime/rtabmap.db}
   # with slam, RTAB-Map keyframes become Hydra's agent pose graph and its loop closures are fed to
   # Hydra's backend live (realtime/rtabmap_hydra_bridge.py); bridge_log records each closure
@@ -61,6 +63,11 @@ launch:
   # live scene graph files for tools/dsg_viewer --live (realtime/live_dsg_dump.py)
   - arg: {name: live_dsg, default: 'false'}
   - arg: {name: live_dsg_dir, default: /root/data/realtime/default/hydra/live}
+  # open-vocabulary object candidates at 2 Hz (realtime/ov_objects.py: EfficientViT-SAM + SigLIP2, sharpest
+  # keyframe, wall / floor drop, 3D fusion into objects); needs the ov_bench engines and virtualenv under /root/data/ov_bench
+  - arg: {name: ov_objects, default: 'false'}
+  - arg: {name: ov_objects_out, default: none}  # directory for per-keyframe output, none: no output
+  - arg: {name: ov_bench, default: /root/data/ov_bench}
   - arg: {name: recorder, default: 'true'}
   - arg: {name: segmentation, default: 'true'}
   # segmentation speed: FP16 engine, inference resolution, debug image outputs
@@ -151,6 +158,8 @@ launch:
         - {name: database_path, value: $(var slam_db)}
         - {name: Rtabmap/DetectionRate, value: "'$(var slam_rate)'"}
         - {name: Mem/IncrementalMemory, value: 'true'}
+        - {name: config_path, value: $(var slam_config)}
+        - {name: subscribe_odom_info, value: $(var slam_odom_info)}
       remap:
         - {from: rgb/image, to: $(var rgb)}
         - {from: depth/image, to: $(var depth)}
@@ -170,6 +179,16 @@ launch:
       cmd: >-
         python3 $(dirname)/live_dsg_dump.py --ros-args
         -p use_sim_time:=$(var use_sim_time) -p out_dir:=$(var live_dsg_dir)
+      output: screen
+
+  - executable:
+      if: $(eval "'$(var ov_objects)'.lower() in ('true', '1') and '$(var part)' != 'odometry'")
+      cmd: >-
+        python3 $(dirname)/ov_objects.py --ros-args -p use_sim_time:=$(var use_sim_time)
+        -p ov_bench:=$(var ov_bench) -p out_dir:=$(var ov_objects_out)
+        -r color:=$(var rgb) -r labels:=$(var camera_ns)/semantic/image_raw -r depth:=$(var depth) -r objects:=/ov_objects/objects
+      env:
+        - {name: PYTHONPATH, value: "$(env PYTHONPATH):$(var ov_bench)/.venv/lib/python3.12/site-packages"}
       output: screen
 
   # orientation for the raw D435i IMU (gyro + accel, no magnetometer)
