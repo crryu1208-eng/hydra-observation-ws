@@ -27,10 +27,14 @@ from nav_msgs.msg import Odometry
 from std_msgs.msg import String
 
 CAM = "/camera/camera"
+# the segmentation runs on the decimated frames when the camera is faster than the mapping (rt.launch.yaml
+# image_rate, realtime/frame_decimator.py): STAGE_IMAGE_NS=/camera/decimated
+IMG = os.environ.get("STAGE_IMAGE_NS", CAM)
 TOPICS = {
     "rgb": (f"{CAM}/color/image_raw", Image),
     "depth": (f"{CAM}/aligned_depth_to_color/image_raw", Image),
-    "labels": (f"{CAM}/semantic/image_raw", Image),
+    "mapped": (f"{IMG}/color/image_raw", Image),
+    "labels": (f"{IMG}/semantic/image_raw", Image),
     "odom": ("/rtabmap/odom", Odometry),
 }
 
@@ -126,6 +130,17 @@ def summarize(arr):
             "gap_ms_p50": round(pct(gaps, 0.5), 1) if gaps else None,
             "gap_ms_max": round(max(gaps), 1) if gaps else None,
         }
+    # latency over time (10 s windows by color arrival): does a stage fall behind more and more?
+    win = {}
+    for key in ("labels", "recorded"):
+        a = arr.get(key) or {}
+        rows = {}
+        for s, tc in rgb.items():
+            if s in a:
+                rows.setdefault(int((tc - t0) // 10), []).append((a[s] - tc) * 1000)
+        win[key] = [{"t_s": k * 10, "n": len(v), "p50": round(pct(v, 0.5), 1), "p90": round(pct(v, 0.9), 1),
+                     "max": round(max(v), 1)} for k, v in sorted(rows.items())]
+    out["windows"] = win
     return out
 
 

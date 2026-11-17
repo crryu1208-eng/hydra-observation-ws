@@ -6,7 +6,7 @@
 # Run interactively inside the hydra-dev container:
 #   docker exec -it hydra-dev bash /root/hydra_ws/src/hydra-realtime/realtime/run_realtime.sh [session_name]
 # Output: /root/data/realtime/<session>/{bag,observations,hydra,rtabmap,logs}
-# Press Enter (or Ctrl-C) to stop. Env: FPS (default 15), RES (color and depth size, default
+# Press Enter (or Ctrl-C) to stop. Env: FPS (default 15), PIPE_FPS (mapping rate, default FPS), OV=1 (open-vocabulary objects), RES (color and depth size, default
 # 1280x720, the D435i depth maximum; 640x480 for the earlier sessions), VIS=1 starts the Hydra visualizer,
 # CAM_NICE (camera driver nice value, default -10), CAM_HEIGHT (camera height when the floor is not in view at the start, default 0), FLOOR_LOCK=0 (no floor height lock, for sessions that change floors), CAM_CPUS / PIPE_CPUS (CPU pinning, PIN=0 off), STOP_AFTER=<s> stops automatically (non-interactive runs), RECORD_IR=1 IR_EMITTER=on|off|onoff records the IR stereo pair (RES default then 848x480), RGB_EXPOSURE (default auto; or 0.1 ms units, e.g. 83 = 1/120 s) and RGB_GAIN (default 50), REBUILD=0 skips rebuilding the map with the loop-closed poses after recording (<session>/rebuilt, about the session's length), LIVE=0 turns off the live scene graph
 # files for the DSG viewer (<session>/hydra/live; on the host:
@@ -29,6 +29,12 @@ set -m
 # background job below takes stdin from /dev/null
 NAME="${1:-$(date +%Y%m%d_%H%M%S)}"
 FPS="${FPS:-15}"
+# PIPE_FPS < FPS: the camera and the raw bag run at FPS, segmentation / odometry / Hydra / open-vocabulary
+# objects get PIPE_FPS (realtime/frame_decimator.py). lab_03 replayed at 30 fps: Hydra keeps ~24 fps and falls
+# behind (latency 0.2 -> 30 s in 2 min), so FPS=30 PIPE_FPS=15 RES=848x480 records 30 fps and maps at 15 Hz
+PIPE_FPS="${PIPE_FPS:-$FPS}"
+# OV=1: open-vocabulary objects at 2 Hz (realtime/ov_objects.py, ov_bench engines under /root/data/ov_bench)
+OV="${OV:-0}"
 RECORD_IR="${RECORD_IR:-0}"
 # with the IR stereo pair 1280x720 was too much (library_test: odometry 8.2 Hz, recorded 7.4 fps,
 # no odom_raw in the bag); 848x480 (Intel's recommended D435 depth size): odometry 14.8 Hz
@@ -126,7 +132,9 @@ cam_pin=(); [ "$PIN" = 1 ] && cam_pin=(taskset -c "$CAM_CPUS")
 CAM_PID=$!; PIDS+=($CAM_PID)
 
 LAUNCH_PID=; ODOM_PID=
-echo "session $OUT (${W}x${H} @ $FPS fps)"
+IMAGE_ARGS=(); [ "$PIPE_FPS" != "$FPS" ] && IMAGE_ARGS=(image_rate:=$PIPE_FPS camera_rate:=$FPS)
+ov=false; [ "$OV" = 1 ] && ov=true
+echo "session $OUT (${W}x${H} @ $FPS fps, mapping at $PIPE_FPS Hz)"
 echo "=== Before RECORDING appears (about 12 s): ==="
 echo "===   1. hold the camera still                                                          ==="
 echo "===   2. tilt it ~40 deg down to the floor about 1 m ahead (not a desk top): the floor   ==="
@@ -216,7 +224,7 @@ mkdir -p "$OUT/rtabmap"
 ros2 launch $RT/rt.launch.yaml part:=mapping \
   log_path:=$LOG_PATH observation_path:=$OBS start_visualizer:=$vis \
   seg_fp16:=true seg_debug_images:=false hydra_config:=$RT/hydra_rt.yaml \
-  slam:=true live_dsg:=$live live_dsg_dir:=$LOG_PATH/live \
+  slam:=true live_dsg:=$live live_dsg_dir:=$LOG_PATH/live ov_objects:=$ov "${IMAGE_ARGS[@]}" \
   < /dev/null > "$RUN_LOGS/launch.log" 2>&1 &
 LAUNCH_PID=$!; PIDS+=($LAUNCH_PID); stamp "mapping launched"
 
@@ -235,7 +243,7 @@ fi
 ros2 launch $RT/rt.launch.yaml part:=odometry odom_initial_pose:="$POSE" \
   gravity_floor:=$floor_lock gravity_floor_auto:=$floor_auto \
   odom_image_decimation:=$ODOM_DECIMATION \
-  slam:=true slam_db:=$OUT/rtabmap/rtabmap.db bridge_log:=$RUN_LOGS/bridge.jsonl \
+  slam:=true slam_db:=$OUT/rtabmap/rtabmap.db bridge_log:=$RUN_LOGS/bridge.jsonl "${IMAGE_ARGS[@]}" \
   < /dev/null > "$RUN_LOGS/launch_odom.log" 2>&1 &
 ODOM_PID=$!; PIDS+=($ODOM_PID); stamp "odometry launched"
 
@@ -298,7 +306,8 @@ python3 $RT/session_check.py "$OUT" 2>&1 | tee "$RUN_LOGS/session_check.log" || 
 # the map again with the loop-closed per-frame poses (<session>/rebuilt): mesh, objects and places
 # then agree with the poses the frames carry (the live backend mesh is deformed only approximately)
 if [ "$REBUILD" = 1 ]; then
-  bash $RT/rebuild_map.sh "$OUT" 2>&1 | tee "$RUN_LOGS/rebuild.log" || echo "rebuild failed, see $RUN_LOGS/rebuild.log"
+  IMAGE_RATE=$( [ "$PIPE_FPS" != "$FPS" ] && echo $PIPE_FPS ) CAMERA_RATE=$FPS \
+    bash $RT/rebuild_map.sh "$OUT" 2>&1 | tee "$RUN_LOGS/rebuild.log" || echo "rebuild failed, see $RUN_LOGS/rebuild.log"
 fi
 # last check of the finished map: floor plane fit, levelled copy in <session>/levelled
 python3 $RT/level_session.py "$OUT" 2>&1 | tee "$RUN_LOGS/level_session.log" || true

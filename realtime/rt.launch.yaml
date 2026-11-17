@@ -5,6 +5,11 @@
 ---
 launch:
   - arg: {name: camera_ns, default: /camera/camera}
+  # image_rate > 0: the camera runs faster (e.g. 30 fps, raw bag at full rate) and realtime/frame_decimator.py
+  # passes image_rate Hz of color + aligned depth on under /camera/decimated to segmentation, odometry, Hydra
+  # and the open-vocabulary objects (lab_03 at 30 fps: Hydra keeps ~24 fps and falls behind); 0: all frames
+  - arg: {name: image_rate, default: '0'}
+  - arg: {name: camera_rate, default: '30'}
   - arg: {name: labelspace, default: ade20k_full}
   # Hydra's label space file: realtime/ade20k_gdsam_label_space.yaml = ade20k_full with doors and
   # counters as objects too (Hydra's own: $(find-pkg-share hydra)/config/label_spaces/ade20k_full_label_space.yaml)
@@ -77,9 +82,17 @@ launch:
   - arg: {name: seg_debug_images, default: 'true'}
   - arg: {name: hydra_config, default: $(dirname)/../config/d435i_obs.yaml}
   - arg: {name: input_config, default: $(dirname)/../config/d435i_input_obs.yaml}
-  - let: {name: rgb, value: $(var camera_ns)/color/image_raw}
-  - let: {name: depth, value: $(var camera_ns)/aligned_depth_to_color/image_raw}
-  - let: {name: info, value: $(var camera_ns)/color/camera_info}
+  - let: {name: image_ns, value: "$(eval \"'/camera/decimated' if float('$(var image_rate)') > 0 else '$(var camera_ns)'\")"}
+  - let: {name: rgb, value: $(var image_ns)/color/image_raw}
+  - let: {name: depth, value: $(var image_ns)/aligned_depth_to_color/image_raw}
+  - let: {name: info, value: $(var image_ns)/color/camera_info}
+
+  - executable:
+      if: $(eval "float('$(var image_rate)') > 0 and '$(var part)' != 'odometry'")
+      cmd: >-
+        python3 $(dirname)/frame_decimator.py --ros-args -p use_sim_time:=$(var use_sim_time)
+        -p in_ns:=$(var camera_ns) -p out_ns:=$(var image_ns) -p in_rate:=$(var camera_rate) -p rate:=$(var image_rate)
+      output: screen
 
   # pose: RTAB-Map visual odometry, publishes odom -> camera_link
   - node:
@@ -129,8 +142,8 @@ launch:
         python3 $(dirname)/gravity_odom.py --ros-args -p use_sim_time:=$(var use_sim_time)
         -p tau_s:=$(var gravity_tau) -r odom_in:=/rtabmap/odom_raw -r odom_out:=/rtabmap/odom
         -p floor_height:=$(var gravity_floor) -p floor_auto:=$(var gravity_floor_auto)
-        -r imu:=$(var camera_ns)/imu -r depth:=$(var depth) -r semantic:=$(var camera_ns)/semantic/image_raw
-        -r depth_info:=$(var camera_ns)/aligned_depth_to_color/camera_info
+        -r imu:=$(var camera_ns)/imu -r depth:=$(var depth) -r semantic:=$(var image_ns)/semantic/image_raw
+        -r depth_info:=$(var image_ns)/aligned_depth_to_color/camera_info
       output: screen
 
   - node:
@@ -186,7 +199,7 @@ launch:
       cmd: >-
         python3 $(dirname)/ov_objects.py --ros-args -p use_sim_time:=$(var use_sim_time)
         -p ov_bench:=$(var ov_bench) -p out_dir:=$(var ov_objects_out)
-        -r color:=$(var rgb) -r labels:=$(var camera_ns)/semantic/image_raw -r depth:=$(var depth) -r objects:=/ov_objects/objects -r closed_objects:=/ov_objects/closed_objects
+        -r color:=$(var rgb) -r labels:=$(var image_ns)/semantic/image_raw -r depth:=$(var depth) -r objects:=/ov_objects/objects -r closed_objects:=/ov_objects/closed_objects
       env:
         - {name: PYTHONPATH, value: "$(env PYTHONPATH):$(var ov_bench)/.venv/lib/python3.12/site-packages"}
       output: screen
@@ -207,11 +220,11 @@ launch:
         - {from: imu/data_raw, to: $(var camera_ns)/imu}
         - {from: imu/data, to: /rtabmap/imu}
 
-  # 2D semantic segmentation (TensorRT); publishes <camera_ns>/semantic/image_raw
+  # 2D semantic segmentation (TensorRT); publishes <image_ns>/semantic/image_raw
   - group:
       if: $(eval "'$(var segmentation)'.lower() in ('true', '1') and '$(var part)' != 'odometry'")
       children:
-      - push_ros_namespace: {namespace: $(var camera_ns)}
+      - push_ros_namespace: {namespace: $(var image_ns)}
       - include:
           file: $(find-pkg-share semantic_inference_ros)/launch/closed_set.launch.yaml
           arg:
@@ -230,7 +243,7 @@ launch:
   - set_remap: {from: hydra/input/camera/rgb/image_raw, to: $(var rgb)}
   - set_remap: {from: hydra/input/camera/depth_registered/image_rect, to: $(var depth)}
   - set_remap: {from: hydra/input/camera/rgb/camera_info, to: $(var info)}
-  - set_remap: {from: hydra/input/camera/semantic/image_raw, to: $(var camera_ns)/semantic/image_raw}
+  - set_remap: {from: hydra/input/camera/semantic/image_raw, to: $(var image_ns)/semantic/image_raw}
   - include:
       if: $(eval "'$(var hydra)'.lower() in ('true', '1') and '$(var part)' != 'odometry'")
       file: $(find-pkg-share hydra_ros)/launch/hydra.launch.yaml

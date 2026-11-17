@@ -12,7 +12,9 @@
 # Env: OUT_NAME (default rebuilt) names the output folder; SEG_LABELS=<dir> plays label images
 # saved per frame (seg_labels.sh, gdsam_labels.py) instead of running the segmentation;
 # LABELSPACE=<file> is Hydra's label space (e.g. realtime/ade20k_gdsam_label_space.yaml);
-# HYDRA_CONFIG another Hydra config (default realtime/hydra_rt.yaml).
+# HYDRA_CONFIG another Hydra config (default realtime/hydra_rt.yaml); IMAGE_RATE / CAMERA_RATE: the session was
+# recorded faster than it was mapped (run_realtime.sh PIPE_FPS < FPS): the same frames are passed on again
+# (realtime/frame_decimator.py decides by the stamp).
 set -eo pipefail
 set -m  # background launches get their own process group (stopped as a group below)
 S="${1:?session directory}"
@@ -34,6 +36,7 @@ ln -s ../observations "$OUT/observations"
 # pose_tf_player.py, the live keyframes) and no RTAB-Map / bridge / odometry
 SEG_ARGS=(); [ -n "$SEG_LABELS" ] && SEG_ARGS+=(segmentation:=false)
 [ -n "$LABELSPACE" ] && SEG_ARGS+=(labelspace_path:=$LABELSPACE)
+[ -n "$IMAGE_RATE" ] && SEG_ARGS+=(image_rate:=$IMAGE_RATE camera_rate:=${CAMERA_RATE:-30})
 ros2 launch $RT/rt.launch.yaml use_sim_time:=true part:=mapping slam:=true "${SEG_ARGS[@]}" \
   recorder:=false live_dsg:=false seg_fp16:=true seg_debug_images:=false \
   hydra_config:=${HYDRA_CONFIG:-$RT/hydra_rt.yaml} log_path:=$OUT/hydra observation_path:=$OUT/unused \
