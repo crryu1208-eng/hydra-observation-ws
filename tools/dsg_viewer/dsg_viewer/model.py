@@ -18,8 +18,11 @@ GROUP_NAMES = {
     "RoomNodeAttributes": "Rooms",
     "SemanticNodeAttributes": "Buildings",
 }
+# open-vocabulary objects (realtime/ov_dsg.py: layer 2, partition 1) are listed and drawn as their own group
+OV_OBJECTS = "Open-vocab objects"
+OBJECT_GROUPS = ("Objects", OV_OBJECTS)
 # vertical order of groups in the exploded view (multiplied by the layer offset)
-GROUP_LEVEL = {"Objects": 0, "Agents": 0, "Places": 1, "Places 2D": 1, "Rooms": 2, "Buildings": 3}
+GROUP_LEVEL = {"Objects": 0, "Open-vocab objects": 0, "Agents": 0, "Places": 1, "Places 2D": 1, "Rooms": 2, "Buildings": 3}
 
 
 def symbol_str(node_id: int) -> str:
@@ -266,7 +269,8 @@ def load(path: str | pathlib.Path) -> SceneGraph:
             label = a["name"]
         nodes[int(n["id"])] = Node(
             id=int(n["id"]), symbol=symbol_str(int(n["id"])), layer=layer, partition=partition,
-            type=t, group=GROUP_NAMES.get(t, f"Layer {layer}.{partition}"),
+            type=t, group=OV_OBJECTS if (t == "ObjectNodeAttributes" and layer == 2 and partition == 1)
+            else GROUP_NAMES.get(t, f"Layer {layer}.{partition}"),
             position=np.asarray(a.get("position", [0, 0, 0]), dtype=float), attrs=a, label=label)
 
     edges = []

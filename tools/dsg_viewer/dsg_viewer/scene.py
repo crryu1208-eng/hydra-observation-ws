@@ -8,10 +8,11 @@ from dataclasses import dataclass
 import numpy as np
 import pyvista as pv
 
-from .model import GROUP_LEVEL, Node, SceneGraph
+from .model import GROUP_LEVEL, OBJECT_GROUPS, Node, SceneGraph
 
 GROUP_STYLE = {  # color, point size (px)
     "Objects": ("#e4572e", 11),
+    "Open-vocab objects": ("#06d6a0", 11),
     "Agents": ("#2e86ab", 7),
     "Places": ("#7a8b99", 7),
     "Places 2D": ("#76b041", 7),
@@ -218,7 +219,7 @@ class SceneView:
             pts = np.array([self.display_pos(n) for n in nodes])
             color, size = GROUP_STYLE.get(group, DEFAULT_STYLE)
             poly = pv.PolyData(pts)
-            if group == "Objects":
+            if group in OBJECT_GROUPS:
                 poly.point_data["rgb"] = (np.array([label_color(n.label) for n in nodes]) * 255).astype(np.uint8)
                 a = self.p.add_mesh(poly, scalars="rgb", rgb=True, point_size=size, render_points_as_spheres=True,
                                     pickable=False, show_scalar_bar=False, reset_camera=False)
@@ -228,7 +229,7 @@ class SceneView:
             self._add("nodes", a)
             ids += [n.id for n in nodes]
             pos.append(pts)
-            if group == "Objects" and self.opt.object_labels:
+            if group in OBJECT_GROUPS and self.opt.object_labels:
                 a = self.p.add_point_labels(pts + np.array([0, 0, 0.25]), [n.label or n.symbol for n in nodes],
                                             font_size=11, point_size=1, shape_opacity=0.55, show_points=False,
                                             always_visible=True, pickable=False, reset_camera=False)
@@ -296,12 +297,13 @@ class SceneView:
                 self._add("paths", a)
 
     def _build_boxes(self):
-        if not self.opt.boxes or "Objects" in self.opt.hidden_groups:
+        if not self.opt.boxes:
             return
         # one actor for all boxes (colored per vertex): an actor per object made each live
         # reload re-render the scene once per object
         boxes, colors = [], []
-        for n in self.g.groups().get("Objects", []):
+        groups = self.g.groups()
+        for n in [n for g in OBJECT_GROUPS if g not in self.opt.hidden_groups for n in groups.get(g, [])]:
             bb = n.attrs.get("bounding_box") or {}
             if bb.get("type") in (None, "INVALID") or "dimensions" not in bb:
                 continue
@@ -332,7 +334,7 @@ class SceneView:
                                 line_width=3, pickable=False, reset_camera=False)
             self._add("selection", a)
         bb = n.attrs.get("bounding_box") or {}
-        if n.group == "Objects" and bb.get("type") not in (None, "INVALID") and "dimensions" in bb:
+        if n.group in OBJECT_GROUPS and bb.get("type") not in (None, "INVALID") and "dimensions" in bb:
             a = self.p.add_mesh(_box_edges(bb.get("world_P_center", n.position), bb["dimensions"]),
                                 color=SELECT_COLOR, line_width=4, pickable=False, reset_camera=False)
             self._add("selection", a)
@@ -399,6 +401,41 @@ class SceneView:
         cand = np.flatnonzero(ok)
         best = cand[np.lexsort((ndc[cand, 2], np.round(d[cand] / 4)))][0]
         return int(best), float(d[best])
+
+    def pick_box(self, x: int, y: int):
+        """Object whose bounding box the view ray through display pixel (x, y) passes through; of several, the
+        smallest box (a plant inside a desk ring, a monitor on a desk), then the nearest."""
+        if self.g is None:
+            return None
+        ren = self.p.renderer
+        w, h = ren.GetSize()
+        if w == 0 or h == 0:
+            return None
+        cam = ren.GetActiveCamera()
+        m = cam.GetCompositeProjectionTransformMatrix(w / h, -1, 1)
+        Mi = np.linalg.inv(np.array([[m.GetElement(i, j) for j in range(4)] for i in range(4)]))
+        ox, oy = ren.GetOrigin()
+        nx, ny = (x - ox) / w * 2 - 1, (y - oy) / h * 2 - 1
+        a, b = (Mi @ np.array([nx, ny, z, 1.0]) for z in (-1.0, 1.0))
+        o = a[:3] / a[3]; d = b[:3] / b[3] - o
+        d = np.where(np.abs(d) < 1e-12, 1e-12, d)
+        groups = self.g.groups(); best = None
+        for g in OBJECT_GROUPS:
+            if g in self.opt.hidden_groups:
+                continue
+            for n in groups.get(g, []):
+                bb = n.attrs.get("bounding_box") or {}
+                if bb.get("type") in (None, "INVALID") or "dimensions" not in bb:
+                    continue
+                c = np.asarray(bb.get("world_P_center", n.position), float); e = np.asarray(bb["dimensions"], float) / 2
+                t1, t2 = (c - e - o) / d, (c + e - o) / d
+                tn, tf = np.minimum(t1, t2).max(), np.maximum(t1, t2).min()
+                if tf < max(tn, 0):
+                    continue
+                key = (float(np.prod(np.maximum(2 * e, 0.01))), float(max(tn, 0)))
+                if best is None or key < best[0]:
+                    best = (key, n.id)
+        return None if best is None else best[1]
 
     def pick(self, x: int, y: int, radius_px: float = 12.0) -> int | None:
         """Node nearest to display pixel (x, y)."""

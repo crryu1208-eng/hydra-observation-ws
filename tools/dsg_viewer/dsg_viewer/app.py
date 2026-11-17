@@ -288,6 +288,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tree.setHeaderLabels(["Layer / node", "Count"])
         self.tree.setColumnWidth(0, 190)
         self.tree.setUniformRowHeights(True)
+        pal = self.tree.palette()  # the selected row stays clearly marked when the 3D view has the focus
+        for role in (QtGui.QPalette.Highlight, QtGui.QPalette.HighlightedText):
+            pal.setColor(QtGui.QPalette.Inactive, role, pal.color(QtGui.QPalette.Active, role))
+        self.tree.setPalette(pal)
         self.tree.currentItemChanged.connect(self._on_tree_current)
         self.tree.itemChanged.connect(self._on_tree_check)
         ll.addWidget(self.search)
@@ -639,6 +643,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tree.blockSignals(True)
         self.tree.clear()
         self._tree_items.clear()
+        self._hl_item = None
         for group, nodes in self.graph.groups().items():
             top = QtWidgets.QTreeWidgetItem([group, str(len(nodes))])
             top.setData(0, GROUP_ROLE, group)
@@ -653,7 +658,7 @@ class MainWindow(QtWidgets.QMainWindow):
             for n in nodes:
                 it = QtWidgets.QTreeWidgetItem([n.title, ""])
                 it.setData(0, ID_ROLE, n.id)
-                if group == "Objects":
+                if group in model.OBJECT_GROUPS:
                     it.setIcon(0, swatch(label_color(n.label)))
                 if group == "Agents" and self.graph.observations:
                     k = len(self.graph.observations.node_frames.get(n.id, []))
@@ -662,7 +667,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 top.addChild(it)
                 self._tree_items[n.id] = it
             top.setExpanded(group in expanded if expanded is not None
-                            else group in ("Objects", "Rooms", "Buildings"))
+                            else group in (*model.OBJECT_GROUPS, "Rooms", "Buildings"))
         self.tree.blockSignals(False)
 
     def _filter_tree(self, text):
@@ -695,20 +700,43 @@ class MainWindow(QtWidgets.QMainWindow):
         self._set_opt(hidden_groups=frozenset(hidden))
 
     # ---- selection and view -----------------------------------------------------------------
+    def _highlight_tree(self, nid, move=True):
+        """Mark the selected node's row in the tree (bold, selection colour; also when the tree has no focus,
+        e.g. after a click in the 3D view), open its group and scroll to it."""
+        old = getattr(self, "_hl_item", None)
+        if old is not None:
+            try:
+                old.setBackground(0, QtGui.QBrush()); old.setBackground(1, QtGui.QBrush())
+                f = old.font(0); f.setBold(False); old.setFont(0, f)
+            except RuntimeError:  # the tree was refilled
+                pass
+        self._hl_item = None
+        it = self._tree_items.get(nid) if nid is not None else None
+        if it is None:
+            if nid is None:
+                self.tree.blockSignals(True); self.tree.clearSelection(); self.tree.blockSignals(False)
+            return
+        brush = QtGui.QBrush(QtGui.QColor(255, 210, 60, 150))
+        it.setBackground(0, brush); it.setBackground(1, brush)
+        f = it.font(0); f.setBold(True); it.setFont(0, f)
+        self._hl_item = it
+        if move:
+            self.tree.blockSignals(True)
+            it.setHidden(False)
+            p = it.parent()
+            while p is not None:
+                p.setExpanded(True); p = p.parent()
+            self.tree.setCurrentItem(it)
+            self.tree.scrollToItem(it, QtWidgets.QAbstractItemView.PositionAtCenter)
+            self.tree.blockSignals(False)
+
     def select_node(self, nid, from_tree=False, fly=False, keep_frame=False):
         if self.graph is None:
             return
         n = self.graph.nodes.get(nid) if nid is not None else None
         self.scene.select(n.id if n else None)
         self.inspector.show_node(self.graph, n)
-        if n is not None and not from_tree:
-            it = self._tree_items.get(n.id)
-            if it is not None:
-                self.tree.blockSignals(True)
-                it.setHidden(False)
-                self.tree.setCurrentItem(it)
-                self.tree.scrollToItem(it)
-                self.tree.blockSignals(False)
+        self._highlight_tree(n.id if n is not None else None, move=not from_tree)
         if n is not None and n.group == "Agents" and self.graph.observations:
             self.inspector.tabs.setCurrentIndex(self.inspector.frames_tab_index)
             if keep_frame and self.scene.current_frame is not None:
@@ -730,6 +758,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.camera_dock.show()
         if not from_inspector and self.inspector._node is not None and self.inspector._node.id == f.node_id:
             self.inspector.select_frame(frame_id)
+        if not from_inspector and f.node_id is not None:  # the frame's agent node, marked in the tree
+            self._highlight_tree(f.node_id)
         msg = f"frame {frame_id}"
         if f.mapping.get("node_symbol"):
             msg += f" → agent node {f.mapping['node_symbol']}"
@@ -764,6 +794,13 @@ class MainWindow(QtWidgets.QMainWindow):
             return  # a drag (rotate), not a click
         nid, d_node = self.scene.pick_with_distance(x, y)
         fid, d_frame = self.scene.pick_frame(x, y)
+        if nid is None or self.graph.nodes[nid].group not in model.OBJECT_GROUPS:
+            # objects: a click anywhere in the box (smallest box under the cursor) wins over other nodes' points
+            # (the dense floor places) unless the click is on the trajectory
+            bid = self.scene.pick_box(x, y)
+            if bid is not None and fid is None:
+                self.select_node(bid)
+                return
         node_is_agent = nid is not None and self.graph.nodes[nid].group == "Agents"
         # a click on the trajectory shows that camera position's frame; other nodes win when closer
         if fid is not None and (nid is None or node_is_agent or d_frame < d_node):
