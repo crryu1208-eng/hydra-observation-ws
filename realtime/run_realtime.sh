@@ -5,6 +5,7 @@
 # The scene graph is loop-closed while recording; no offline loop_close / reprocess step.
 # Run interactively inside the hydra-dev container:
 #   docker exec -it hydra-dev bash /root/hydra_ws/src/hydra-realtime/realtime/run_realtime.sh [session_name]
+# or on the host with the live DSG viewer started next to it: realtime/record.sh <session> [NAME=value ...]
 # Output: /root/data/realtime/<session>/{bag,observations,hydra,rtabmap,logs}
 # Press Enter (or Ctrl-C) to stop. Env: FPS (default 15), PIPE_FPS (mapping rate, default FPS), OV=1 (open-vocabulary objects), RES (color and depth size, default
 # 1280x720, the D435i depth maximum; 640x480 for the earlier sessions), VIS=1 starts the Hydra visualizer,
